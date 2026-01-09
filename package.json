@@ -1,0 +1,30 @@
+{
+    "name": "poly-with-ts",
+    "version": "1.0.0",
+    "description": "",
+    "main": "dist/index.js",
+    "type": "module",
+    "scripts": {
+        "build": "tsc",
+        "start": "ts-node-esm src/index.ts",
+        "dev": "ts-node-esm src/index.ts",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+        "@polymarket/builder-relayer-client": "^0.0.8",
+        "@polymarket/builder-signing-sdk": "^0.0.8",
+        "@polymarket/clob-client": "^4.22.8",
+        "dotenv": "^16.0.0",
+        "ethers": "^5.8.0",
+        "viem": "^2.43.5",
+        "ws": "^8.19.0"
+    },
+    "devDependencies": {
+        "@types/ws": "^8.18.1",
+        "ts-node": "^10.0.0",
+        "typescript": "^5.0.0"
+    }
+}
