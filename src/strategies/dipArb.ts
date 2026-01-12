@@ -96,6 +96,9 @@ interface MarketState {
     stats: {
         signalsDetected: number;
     };
+
+    // [FIX 2] Arb Locked Flag
+    arbLocked?: boolean;
 }
 
 export interface LateExitConfig {
@@ -219,13 +222,25 @@ export class DipArbStrategy implements Strategy {
      * Finds the next suitable market and starts monitoring it.
      */
     private async rotateToNextMarket(): Promise<void> {
+        // [FIX 1] Enforce One Active Market Per Coin (Stop Stacking)
+        for (const c of Object.values(this.pnlManager.getAllStats().activeCycles)) {
+            if (c.coin === this.config.coin && c.status === 'OPEN') {
+                console.log(color(`⏸ Existing cycle still open for ${this.config.coin}. Not rotating.`, COLORS.YELLOW));
+                // We should probably wait a bit and retry, or just exit?
+                // For now, let's wait 30s and re-check, basically pausing the loop.
+                setTimeout(() => this.rotateToNextMarket(), 30000);
+                return;
+            }
+        }
+
         // 1. Cleanup old market
         if (this.activeMarkets.size > 0) {
             // Check if we need to close stats as LOSS/ABANDON
             for (const state of this.activeMarkets.values()) {
                 if (state.status === 'scanning' && (state.position.yes.totalShares > 0 || state.position.no.totalShares > 0)) {
-                    // Market ended without profit lock
-                    // [SAFETY] Pessimistic Loss Implementation
+                    // [FIX 2] Force Close Before Abandon
+                    await this.forceCloseMarket(state);
+
                     const lossAmount = state.position.yes.totalCost + state.position.no.totalCost;
                     this.pnlManager.closeCycle(state.marketId, 'ABANDON', -lossAmount);
                 }
@@ -375,8 +390,17 @@ export class DipArbStrategy implements Strategy {
             const now = Date.now();
             const timeLeft = Math.round((state.endTime - now) / 1000);
 
-            // [SAFETY] Race Condition Guard - Skip if busy
-            if (state.status !== 'scanning') continue;
+            // [SAFETY] Race Condition Guard
+            // [FIX 3] RELAX GUARD to allow exits to process even if status is 'EXITING' or 'partial_unwind'
+            // We ONLY skip if status is 'complete' (meaning totally dead/waiting)
+            // [SAFETY] Race Condition Guard
+            // [FIX 3] RELAX GUARD to allow exits to process even if status is 'EXITING' or 'partial_unwind'
+            // We ONLY skip if status is 'complete' (meaning totally dead/waiting)
+            if (state.status === 'complete') continue;
+
+            // [FIX 2] Arb Locked Guard
+            // If arb is locked, we keep scanning but skip logic unless close to expiry (allow late exits)
+            if (state.arbLocked && timeLeft > 90) continue;
 
             // [SAFETY] Daily Drawdown Kill Switch (5%)
             if (this.pnlManager.checkDrawdown(0.05)) {
@@ -428,10 +452,11 @@ export class DipArbStrategy implements Strategy {
                             oppSideState.avgPrice = oppSideState.totalCost / oppSideState.totalShares;
 
                             // [CRITICAL] POST-HEDGE LOCK
-                            // Mark cycle complete to block further "optimizing" of a bad pair.
-                            // We are now locked in a (likely losing) pair, waiting for expiry.
-                            state.status = 'complete';
-                            console.log(color(`🔒 PAIR LOCKED (Forced Hedge: ${filledShares} ${oppositeSide.toUpperCase()}). Waiting for expiry...`, COLORS.MAGENTA));
+                            // [FIX] Don't kill the cycle. Set locked flag but keep scanning for exits.
+                            state.arbLocked = true;
+                            state.status = 'scanning';
+
+                            console.log(color(`🔒 PAIR FLATTENED (Forced Hedge: ${filledShares} ${oppositeSide.toUpperCase()}). Locked new buys, scanning for exits...`, COLORS.MAGENTA));
                         } else {
                             console.log(color("❌ Forced Hedge Failed: executeOrder returned 0.", COLORS.RED));
                         }
@@ -442,18 +467,27 @@ export class DipArbStrategy implements Strategy {
                 }
             }
 
-            // [OPTIMIZATION] LATE DOMINANCE EXIT (Time-Weighted)
+            // [FIX 4] EXIT HIERARCHY (Time Priority)
+            // 1. Partial Unwind (< 45s) - Highest Priority (Snapshot risk reduction)
+            await this.checkAndExecutePartialUnwind(state);
+
+            // 2. Late Exit (< 60s)
             await this.checkAndExecuteLateExit(state);
 
-            // [OPTIMIZATION] EARLY EXIT (Profit Locking)
+            // 3. Early Exit (Profit Locking) - Lowest Priority
             await this.checkAndExecuteEarlyExit(state);
-
-            // [OPTIMIZATION] PARTIAL UNWIND (Winner-Only Exit)
-            await this.checkAndExecutePartialUnwind(state);
 
             // AUTOMATIC ROTATION TRIGGER (Market End)
             if (timeLeft <= 0) {
                 console.log(color(`[STATUS] Market ${state.slug} has ENDED.`, COLORS.YELLOW));
+
+                // [FIX 4] Auto-Redeem on Expiry
+                try {
+                    await redeemPositions();
+                } catch (e) {
+                    console.error("Auto-redeem failed:", e);
+                }
+
                 // [SAFETY] Pessimistic Loss
                 if (state.position.yes.totalShares > 0 || state.position.no.totalShares > 0) {
                     const lossAmount = state.position.yes.totalCost + state.position.no.totalCost;
@@ -652,6 +686,9 @@ export class DipArbStrategy implements Strategy {
 
                 // --- SPAM & RISK CONTROLS ---
 
+                // [FIX 2 - Round 3] Stop Buying if Arb Locked
+                if (state.arbLocked) return;
+
                 // [FIX 1] Side Lock
                 if (sideState.isBuying) return;
 
@@ -662,6 +699,19 @@ export class DipArbStrategy implements Strategy {
                 if (state.position.yes.totalShares > 0 || state.position.no.totalShares > 0) {
                     if (Date.now() - state.lastImproveTs > 60000) {
                         return; // Paused due to stagnation
+                    }
+                }
+
+                // [FIX 5] Global Exposure Cap (30% Hard Limit)
+                const coinStats = this.pnlManager.getCoinStats(this.config.coin);
+                const currentWalletBal = this.pnlManager.getAllStats().walletBalance;
+
+                // Safety fallback if wallet balance is 0 or missing (prevents division by zero or infinite trading)
+                if (currentWalletBal > 0) {
+                    if (coinStats.currentExposure > currentWalletBal * 0.30) {
+                        // We are over-exposed globally. Stop buying.
+                        if (Math.random() < 0.01) console.log(color("🛑 Global Exposure Cap Hit (30%). Pause.", COLORS.YELLOW));
+                        return;
                     }
                 }
 
@@ -840,7 +890,9 @@ export class DipArbStrategy implements Strategy {
             }
 
             if (pairCost <= this.config.sumTarget) {
-                state.status = 'complete';
+                // [FIX 2] Keep scanning to allow monitoring, but lock entry
+                state.arbLocked = true;
+                // state.status = 'complete'; // REMOVED: Don't kill the cycle
 
                 // Calculate realized profit approximation (Matched Shares)
                 const matchedShares = Math.min(yes.totalShares, no.totalShares);
@@ -1193,6 +1245,9 @@ export class DipArbStrategy implements Strategy {
             // [FIX] Log Realized Profit immediately
             this.pnlManager.logPartialProfit(state.marketId, totalWinnerProfit);
 
+            // [FIX 3] Sync Exposure
+            this.pnlManager.updateCycleCost(state.marketId, state.position.yes.totalCost, state.position.no.totalCost);
+
             // We do NOT zero out the loser side. We keep it.
             // We do NOT close the cycle. The cycle is still open until expiry or manual redemption.
 
@@ -1202,6 +1257,36 @@ export class DipArbStrategy implements Strategy {
             console.error("Error partial unwind:", e);
             state.status = 'scanning';
         }
+    }
+
+    private async forceCloseMarket(state: MarketState): Promise<void> {
+        console.log(color(`[FORCE CLOSE] Liquidating ${state.slug}`, COLORS.MAGENTA));
+
+        for (const [side, idx] of [['yes', 0], ['no', 1]] as const) {
+            const sideKey = side as 'yes' | 'no';
+            const qty = state.position[sideKey].totalShares;
+
+            if (qty <= 0) continue;
+
+            try {
+                const book = await this.clobClient!.getOrderBook(state.tokenIds[idx]);
+                if (!book.bids.length) {
+                    console.log(color(`   ⚠️ No liquidity for ${side.toUpperCase()} force close.`, COLORS.YELLOW));
+                    continue;
+                }
+
+                const bestBid = parseFloat(book.bids[0].price);
+                // Reduce checks, just sell.
+                await this.executeSell(state.tokenIds[idx], qty, bestBid, `FORCE-CLOSE-${side.toUpperCase()}`);
+            } catch (e) {
+                console.error(`   ❌ Failed to force close ${side.toUpperCase()}:`, e);
+            }
+        }
+
+        // 3. Final Redemption Check (just in case)
+        try {
+            await redeemPositions();
+        } catch (e) { }
     }
 
     private async emergencyHedge(tokenId: string, quantity: number, price: number, label: string) {
@@ -1231,4 +1316,28 @@ export class DipArbStrategy implements Strategy {
             return 0;
         }
     }
+    // [FIX 5] Equity Calculation
+    private async calculateEquity(): Promise<number> {
+        let usdcBal = this.pnlManager.getAllStats().walletBalance;
+        if (usdcBal < 0) usdcBal = 0; // Sanity
+
+        let tokenValue = 0;
+
+        for (const state of this.activeMarkets.values()) {
+            for (const [side, idx] of [['yes', 0], ['no', 1]] as const) {
+                const qty = state.position[side as 'yes' | 'no'].totalShares;
+                if (qty > 0) {
+                    const lastPxStr = this.getLastPrice(state, idx);
+                    const lastPx = parseFloat(lastPxStr);
+                    if (!isNaN(lastPx)) {
+                        tokenValue += qty * lastPx;
+                    }
+                }
+            }
+        }
+
+        return usdcBal + tokenValue;
+    }
 }
+
+
