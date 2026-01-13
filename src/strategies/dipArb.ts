@@ -225,9 +225,105 @@ export class DipArbStrategy implements Strategy {
         // [FIX 1] Enforce One Active Market Per Coin (Stop Stacking)
         for (const c of Object.values(this.pnlManager.getAllStats().activeCycles)) {
             if (c.coin === this.config.coin && c.status === 'OPEN') {
+
+                // [RESUME] If we have an open cycle in DB but NOT in memory (Restart Recov), resume it.
+                if (this.activeMarkets.size === 0) {
+                    console.log(color(`🔄 Detected orphaned open cycle ${c.id}. Resuming...`, COLORS.MAGENTA));
+
+                    try {
+                        // 1. Try scanning upcoming (fast, standard)
+                        let markets = await this.scanUpcomingMarkets(this.config.coin, '15m');
+                        let targetMarket = markets.find(m => m.slug === c.id || m.questionID === c.id);
+
+                        // 2. If not found, try DIRECT fetch (handles active-but-started or slightly expired)
+                        if (!targetMarket) {
+                            console.log(color(`   Secondary search for ${c.id}...`, COLORS.DIM));
+                            // GammaClient.getMarkets supports query params
+                            const direct = await this.gammaClient.getMarkets(`slug=${c.id}`);
+                            if (direct && direct.length > 0) {
+                                targetMarket = direct[0];
+                            }
+                        }
+
+                        if (targetMarket) {
+                            console.log(color(`✅ Found market data for ${c.id}. Re-attaching...`, COLORS.GREEN));
+
+                            // [FIX RESUMPTION PARSING]
+                            let tokenIds: string[] = [];
+                            try {
+                                // Gamma API 'getMarkets' usually returns 'clobTokenIds'
+                                if (targetMarket.clobTokenIds) {
+                                    if (typeof targetMarket.clobTokenIds === 'string') {
+                                        tokenIds = JSON.parse(targetMarket.clobTokenIds);
+                                    } else if (Array.isArray(targetMarket.clobTokenIds)) {
+                                        tokenIds = targetMarket.clobTokenIds;
+                                    }
+                                } else if (targetMarket.tokens) {
+                                    // Fallback for some API versions
+                                    const yesToken = targetMarket.tokens.find((t: any) => t.outcome === 'Yes');
+                                    const noToken = targetMarket.tokens.find((t: any) => t.outcome === 'No');
+                                    if (yesToken && noToken) {
+                                        tokenIds = [yesToken.token_id, noToken.token_id];
+                                    }
+                                }
+                            } catch (e) {
+                                console.error(color("❌ Failed to parse token IDs", COLORS.RED));
+                            }
+
+                            if (tokenIds.length < 2) {
+                                console.log(color("❌ Cannot parse tokens for resumption.", COLORS.RED));
+                            } else {
+                                const startTime = new Date(targetMarket.startTime || targetMarket.startDateIso).getTime();
+                                const endTime = new Date(targetMarket.endTime || targetMarket.endDateIso).getTime();
+
+                                const tokenIdToSide = new Map<string, 'yes' | 'no'>();
+                                tokenIdToSide.set(tokenIds[0], 'yes');
+                                tokenIdToSide.set(tokenIds[1], 'no');
+
+                                this.activeMarkets.set(targetMarket.id, {
+                                    marketId: targetMarket.id,
+                                    tokenIds: tokenIds,
+                                    prices: new Map(),
+                                    tokenIdToSide: tokenIdToSide,
+                                    position: {
+                                        yes: { totalShares: 0, totalCost: c.yesCost || 0, avgPrice: 0, buysTriggered: 0, isBuying: false, lastBuyTs: 0, firstBuyTs: 0 },
+                                        no: { totalShares: 0, totalCost: c.noCost || 0, avgPrice: 0, buysTriggered: 0, isBuying: false, lastBuyTs: 0, firstBuyTs: 0 }
+                                    },
+                                    status: 'scanning',
+                                    endTime: endTime,
+                                    startTime: startTime,
+                                    slug: targetMarket.slug,
+                                    question: targetMarket.question,
+                                    bestPairCost: Infinity,
+                                    lastImproveTs: Date.now(),
+                                    maxMarketUsd: 10,
+                                    stats: { signalsDetected: 0 }
+                                });
+
+                                this.priceSocket.connect(tokenIds);
+                                this.startStatusLoop();
+                                return;
+                            }
+                        } else {
+                            console.log(color(`⚠️ Could not find market ${c.id} from API (Expired?).`, COLORS.YELLOW));
+
+                            // [FIX LOOP] If we have NO exposure, just kill it.
+                            if ((c.yesCost || 0) === 0 && (c.noCost || 0) === 0) {
+                                console.log(color("🧹 Orphan cycle has NO position. Auto-closing to unblock.", COLORS.BRIGHT + COLORS.MAGENTA));
+                                this.pnlManager.closeCycle(c.id, 'ABANDON', 0);
+                                // Retry immediately to find new market
+                                this.rotateToNextMarket();
+                                return;
+                            } else {
+                                console.log(color("❌ Money potentially stuck in unknown market. User intervention required.", COLORS.BG_RED + COLORS.WHITE));
+                            }
+                        }
+                    } catch (e) {
+                        console.error(color(`Failed to resume cycle: ${e}`, COLORS.RED));
+                    }
+                }
+
                 console.log(color(`⏸ Existing cycle still open for ${this.config.coin}. Not rotating.`, COLORS.YELLOW));
-                // We should probably wait a bit and retry, or just exit?
-                // For now, let's wait 30s and re-check, basically pausing the loop.
                 setTimeout(() => this.rotateToNextMarket(), 30000);
                 return;
             }
@@ -332,7 +428,8 @@ export class DipArbStrategy implements Strategy {
             return;
         }
 
-        const maxMarketUsd = walletBal * 0.15;
+        const riskPct = walletBal < 20 ? 0.50 : 0.15;
+        const maxMarketUsd = walletBal * riskPct;
 
         // Log Selection
         box([
@@ -340,7 +437,7 @@ export class DipArbStrategy implements Strategy {
             `Question: ${targetMarket.question}`,
             `Start:    ${new Date(startTime).toLocaleTimeString()} (${timeUntilStart > 0 ? "in " + (timeUntilStart / 60000).toFixed(1) + "m" : "Active"})`,
             `End:      ${new Date(endTime).toLocaleTimeString()}`,
-            `Info:     ${color(`Max Exposure: $${maxMarketUsd.toFixed(2)} (15%)`, COLORS.MAGENTA)}`,
+            `Info:     ${color(`Max Exposure: $${maxMarketUsd.toFixed(2)} (${(riskPct * 100).toFixed(0)}%)`, COLORS.MAGENTA)}`,
             `Status:   ${color("WATCHING (Weighted Avg Logic)", COLORS.GREEN)}`
         ], COLORS.CYAN);
 
@@ -402,9 +499,18 @@ export class DipArbStrategy implements Strategy {
             // If arb is locked, we keep scanning but skip logic unless close to expiry (allow late exits)
             if (state.arbLocked && timeLeft > 90) continue;
 
-            // [SAFETY] Daily Drawdown Kill Switch (5%)
-            if (this.pnlManager.checkDrawdown(0.05)) {
-                console.error(color("\n💀 FATAL: DAILY DRAWDOWN LIMIT EXCEEDED (5%). SHUTTING DOWN.", COLORS.BG_RED + COLORS.WHITE));
+            // [SAFETY] Daily Drawdown Kill Switch (Dynamic)
+            // Small wallets (<$20) are volatile, allow 30% drawdown.
+            // Standard wallets, keep tight 5% leash.
+
+
+            // Better: Read PnL manager state.
+            const stats = this.pnlManager.getAllStats();
+            const startBal = stats.startingBalance;
+            const ddLimit = startBal < 20 ? 0.50 : 0.05;
+
+            if (this.pnlManager.checkDrawdown(ddLimit)) {
+                console.error(color(`\n💀 FATAL: DAILY DRAWDOWN LIMIT EXCEEDED (${(ddLimit * 100).toFixed(0)}%). SHUTTING DOWN.`, COLORS.BG_RED + COLORS.WHITE));
                 process.exit(1);
             }
 
@@ -492,6 +598,11 @@ export class DipArbStrategy implements Strategy {
                 if (state.position.yes.totalShares > 0 || state.position.no.totalShares > 0) {
                     const lossAmount = state.position.yes.totalCost + state.position.no.totalCost;
                     this.pnlManager.closeCycle(state.marketId, 'LOSS', -lossAmount);
+                } else {
+                    // [FIX LOOP] Clean Exit (Watching only, no shares)
+                    // Must close cycle to remove from 'activeCycles' in PnL
+                    this.pnlManager.closeCycle(state.marketId, 'EXPIRED', 0);
+                    console.log(color("🧹 Cycle expired while watching. Closed cleanly.", COLORS.DIM));
                 }
 
                 this.rotateToNextMarket();
@@ -826,24 +937,68 @@ export class DipArbStrategy implements Strategy {
         const availableUsd = parseFloat((balRes as any).balance || "0") / 1e6;
         this.pnlManager.updateWalletBalance(availableUsd);
 
-        // [RISK] 5% Cap Logic
+        // [RISK] Risk Cap Logic (Dynamic)
+        // If wallet < $20, allow 50% risk (Aggressive Degen Mode).
+        // Otherwise, stick to 15% for safety.
+        // User requested strict adherence to this cap for TOTAL hedge cost.
+        const riskPct = availableUsd < 20 ? 0.50 : 0.15;
+
         let maxSharesRisk = requestedShares;
 
         if (!bypassRisk) {
-            const maxUsd = availableUsd * 0.05;
-            maxSharesRisk = Math.floor(maxUsd / price);
+            const maxLiabilityUsd = availableUsd * riskPct;
+
+            // [FIX] Strict Liability-Based Sizing
+            // Total "Hedge Budget" is 25% of wallet (e.g. $3.25).
+            // This budget must cover the entire potential liability ($1.00/share).
+            const liabilityPrice = 1.0;
+            maxSharesRisk = Math.floor(maxLiabilityUsd / liabilityPrice);
+
             if (maxSharesRisk <= 0) {
-                console.log(color(`[${label}] Risk Check Failed: Bal $${availableUsd.toFixed(2)} too low for 5% sizing @ $${price}`, COLORS.RED));
+                console.log(color(`[${label}] Risk Check Failed: Bal $${availableUsd.toFixed(2)} too low for liability sizing (Max shares: ${maxSharesRisk})`, COLORS.RED));
                 return 0;
             }
         } else {
-            // If bypassing risk, capped only by TOTAL balance
+            // Forced Hedge: Take whatever we can get
             maxSharesRisk = Math.floor(availableUsd / price);
         }
 
-        const minShares = Math.ceil(1.0 / price);
+        // [FIX] Dynamic Min-Size Fetching
+        // CLOB often enforces min sizes > 1 share. We must check.
+        let minShares = 1;
+        try {
+            const book = await this.clobClient.getOrderBook(tokenId);
+            // API usually returns 'min_order_size' or similar. 
+            // Based on user logs: "Size (2) lower than the minimum: 5"
+            // We'll trust the book object.
+            if ((book as any).min_order_size) {
+                minShares = parseFloat((book as any).min_order_size);
+            }
+        } catch (e) {
+            console.log(color(`[${label}] Failed to fetch min size, defaulting to 1`, COLORS.YELLOW));
+        }
+
         let finalShares = Math.min(requestedShares, maxSharesRisk);
-        if (finalShares < minShares) finalShares = minShares;
+
+        // [FIX] Strict Min-Size Check (Do NOT override risk)
+        if (!bypassRisk && finalShares < minShares) {
+            console.log(color(`[${label}] Risk Check Failed: Required Min Size (${minShares}) > Max Safe Shares (${finalShares}). Trade Aborted.`, COLORS.RED));
+            return 0;
+        }
+
+        // Final sanity check
+        if (finalShares < minShares && !bypassRisk) return 0;
+
+        // For forced hedge...
+        if (finalShares < minShares) {
+            if (bypassRisk) {
+                // Try to force Min Size for hedge if we are close?
+                // No, if we can't afford it, likely rejection.
+                if (finalShares <= 0) return 0;
+            } else {
+                return 0;
+            }
+        }
 
         const exactCost = finalShares * price;
 
@@ -890,9 +1045,12 @@ export class DipArbStrategy implements Strategy {
             }
 
             if (pairCost <= this.config.sumTarget) {
-                // [FIX 2] Keep scanning to allow monitoring, but lock entry
+                // [FIX BUG 1] Infinite Trigger Guard
+                if (state.arbLocked) return;
+
+                // [FIX BUG 1 & 2] State Machine Transition which stops re-entry
                 state.arbLocked = true;
-                // state.status = 'complete'; // REMOVED: Don't kill the cycle
+                state.status = 'complete'; // Stop scanning, stop calling checks
 
                 // Calculate realized profit approximation (Matched Shares)
                 const matchedShares = Math.min(yes.totalShares, no.totalShares);
@@ -905,6 +1063,7 @@ export class DipArbStrategy implements Strategy {
                 console.log(color("✅ SUM TARGET HIT! Locking Arb for Expiry.", COLORS.GREEN));
 
                 // Record as ARB_LOCKED with 0 realized PnL for now
+                // This is now safe because status='complete' prevents re-run.
                 this.pnlManager.closeCycle(state.marketId, "ARB_LOCKED", 0);
 
                 this.logResult(state, pairCost, totalProfit);

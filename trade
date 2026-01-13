@@ -6,6 +6,9 @@
 COIN=$1
 shift # Remove the first argument (coin) so the rest can be passed directly
 
+# Normalize coin input (remove - or --)
+COIN=${COIN//-/}
+
 if [ -z "$COIN" ]; then
   echo "Usage: ./trade <coin> [options]"
   echo "Coins: btc, eth, sol, xrp"

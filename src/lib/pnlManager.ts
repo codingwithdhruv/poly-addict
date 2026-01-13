@@ -33,7 +33,7 @@ export interface CycleStats {
     status: 'OPEN' | PnlReason;
 }
 
-export type PnlReason = 'WIN' | 'LOSS' | 'ABANDON' | 'EARLY_EXIT' | 'LATE_EXIT' | 'ARB' | 'ARB_LOCKED';
+export type PnlReason = 'WIN' | 'LOSS' | 'ABANDON' | 'EARLY_EXIT' | 'LATE_EXIT' | 'ARB' | 'ARB_LOCKED' | 'EXPIRED';
 
 interface GlobalState {
     coins: Record<string, CoinPnL>;
