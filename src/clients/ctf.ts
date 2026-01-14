@@ -139,7 +139,7 @@ export class CTFClient {
     async redeemByTokenIds(
         conditionId: string,
         tokenIds: TokenIds,
-        outcome?: string,
+        outcome?: string | 'BOTH',
         isProxy: boolean = false
     ): Promise<RedeemResult> {
         // Check resolution status
@@ -148,7 +148,7 @@ export class CTFClient {
             throw new Error('Market is not resolved yet');
         }
 
-        // Auto-detect outcome if not provided
+        // Auto-detect outcome if not provided (and not 'BOTH')
         const winningOutcome = outcome || resolution.winningOutcome;
         if (!winningOutcome) {
             throw new Error('Could not determine winning outcome');
@@ -156,18 +156,21 @@ export class CTFClient {
 
         const targetAddress = isProxy && CONFIG.POLY_PROXY_ADDRESS ? CONFIG.POLY_PROXY_ADDRESS : this.wallet.address;
 
-        // Get token balance using Polymarket token IDs
-        const balances = await this.getPositionBalanceByTokenIds(conditionId, tokenIds, targetAddress);
-        const tokenBalance = winningOutcome === 'YES' ? balances.yesBalance : balances.noBalance;
+        let tokenBalance = "0";
+        if (winningOutcome !== 'BOTH') {
+            // Get token balance using Polymarket token IDs
+            const balances = await this.getPositionBalanceByTokenIds(conditionId, tokenIds, targetAddress);
+            tokenBalance = winningOutcome === 'YES' ? balances.yesBalance : balances.noBalance;
 
-        if (parseFloat(tokenBalance) === 0) {
-            throw new Error(`No ${winningOutcome} tokens to redeem`);
+            if (parseFloat(tokenBalance) === 0) {
+                throw new Error(`No ${winningOutcome} tokens to redeem`);
+            }
         }
 
-        console.log(`Redeeming ${tokenBalance} ${winningOutcome} tokens from ${targetAddress}...`);
+        console.log(`Redeeming ${winningOutcome === 'BOTH' ? 'ALL' : winningOutcome} tokens from ${targetAddress}...`);
 
-        // indexSets: [1] for YES, [2] for NO
-        const indexSets = winningOutcome === 'YES' ? [1] : [2];
+        // indexSets: [1] for YES, [2] for NO, [1, 2] for BOTH
+        const indexSets = winningOutcome === 'BOTH' ? [1, 2] : (winningOutcome === 'YES' ? [1] : [2]);
 
         // 1.5 multiplier for gas
         const gasPrice = await this.provider.getGasPrice();

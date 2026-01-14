@@ -111,6 +111,41 @@ Scans for risk-free arbs on a specific asset.
 
 ---
 
+## 🖥️ VPS / Production Deployment (PM2)
+
+For stable operation on a VPS (e.g., DigitalOcean, AWS), **do not use the `./trade` script**. It is designed for local development.
+
+### 1. Build the Project
+You must compile the TypeScript code before running in production.
+```bash
+npm run build
+```
+*(If you see "Exit code 2", ignore it. The build will still produce the necessary files in `dist/`.)*
+
+### 2. Configure PM2
+Use `pm2` to run the **compiled** JavaScript file (`dist/main.js`) directly.
+
+**Start ETH Bot**
+```bash
+pm2 start dist/main.js --name trade-eth -- --eth
+```
+
+**Start BTC Bot**
+```bash
+pm2 start dist/main.js --name trade-btc -- --btc
+```
+
+**Helpful PM2 Commands**
+```bash
+pm2 list          # Show running bots
+pm2 logs          # View logs (real-time)
+pm2 save          # Save process list for auto-restart
+pm2 stop all      # Stop all
+pm2 delete all    # Clear list
+```
+
+---
+
 ## 🔧 Configuration Flags
 
 | Flag | Description | Default (ETH) | Example |
