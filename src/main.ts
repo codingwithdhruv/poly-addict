@@ -116,13 +116,14 @@ async function main() {
     console.log("Starting Bot...");
 
     // 2. Clients
+    // 2. Clients
     console.log("Initializing local wallet and relay client...");
-    const wallet = new ethers.Wallet(privateKey);
-    const chainId = 137; // Polygon
-    const relayClient = createRelayClient(wallet, chainId);
+    // const wallet = new ethers.Wallet(privateKey); // Not needed here if clients handle it
+    // const chainId = 137; // Polygon
+    const relayClient = createRelayClient();
 
     console.log("Initializing CLOB client...");
-    const clobClient = await createClobClient(rpcUrl, privateKey, chainId);
+    const clobClient = await createClobClient();
 
     // 3. Strategy
     console.log(`Initializing strategy (${args.strategy || 'dip'})...`);
