@@ -499,27 +499,7 @@ export class DipArbStrategy implements Strategy {
             // If arb is locked, we keep scanning but skip logic unless close to expiry (allow late exits)
             if (state.arbLocked && timeLeft > 90) continue;
 
-            // [SAFETY] Daily Drawdown Kill Switch (Dynamic)
-            // Small wallets (<$20) are volatile, allow 30% drawdown.
-            // Standard wallets, keep tight 5% leash.
 
-
-            // Better: Read PnL manager state.
-            const stats = this.pnlManager.getAllStats();
-            const startBal = stats.startingBalance;
-
-            // [TIERED DRAWDOWN]
-            // < $50  -> 50%
-            // < $100 -> 25%
-            // > $100 -> 10%
-            let ddLimit = 0.10;
-            if (startBal < 50) ddLimit = 0.50;
-            else if (startBal < 100) ddLimit = 0.25;
-
-            if (this.pnlManager.checkDrawdown(ddLimit)) {
-                console.error(color(`\n💀 FATAL: DAILY DRAWDOWN LIMIT EXCEEDED (${(ddLimit * 100).toFixed(0)}%). SHUTTING DOWN.`, COLORS.BG_RED + COLORS.WHITE));
-                process.exit(1);
-            }
 
             // [SAFETY] LEG-1 ABORT: Force Hedge if Timeout
             // Detect Naked Position
