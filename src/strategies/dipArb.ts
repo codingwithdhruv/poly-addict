@@ -544,6 +544,9 @@ export class DipArbStrategy implements Strategy {
                             oppSideState.totalCost += filledShares * oppPrice;
                             oppSideState.avgPrice = oppSideState.totalCost / oppSideState.totalShares;
 
+                            // [FIX ISSUE 2] Sync PnL Manager Exposure
+                            this.pnlManager.updateCycleCost(state.marketId, state.position.yes.totalCost, state.position.no.totalCost);
+
                             // [CRITICAL] POST-HEDGE LOCK
                             // [FIX] Don't kill the cycle. Set locked flag but keep scanning for exits.
                             state.arbLocked = true;
@@ -775,8 +778,29 @@ export class DipArbStrategy implements Strategy {
                 return;
             }
 
+            // [FIX BTC] Tuning
+            // BTC enters 90% of markets due to noise. Increase threshold for BTC.
+            let effectiveThreshold = this.config.dipThreshold;
+            if (this.config.coin === 'BTC') {
+                effectiveThreshold = effectiveThreshold * 1.5; // Stricter for BTC
+            }
+
             const drop = (highPrice - currentPrice) / highPrice;
-            if (drop >= this.config.dipThreshold) {
+            if (drop >= effectiveThreshold) {
+
+                // [FIX ENTRY] Stabilization / Bounce Check (P0)
+                // We need at least one uptik or flat period from the bottom
+                // Logic: Current price must NOT be the absolute lowest in last 5 ticks
+                // OR: Current > Last
+                const last5 = history.slice(-5);
+                const minInWindow = Math.min(...last5.map(p => p.price));
+
+                // If we are currently AT the bottom (or lower), wait for bounce.
+                // Exception: If drop is massive (> 2x threshold), maybe catch falling knife? No, strict.
+                if (currentPrice <= minInWindow && history.length > 5) {
+                    // console.log(`[Scanning] Dip found ${(drop*100).toFixed(1)}% but no bounce yet. Waiting...`);
+                    return;
+                }
 
                 const sideLabel = state.tokenIdToSide.get(tokenId) || "???";
                 const sideUpper = sideLabel.toUpperCase();
@@ -800,15 +824,29 @@ export class DipArbStrategy implements Strategy {
                     }
                 }
 
-                // [FIX 5] Global Exposure Cap (30% Hard Limit)
-                const coinStats = this.pnlManager.getCoinStats(this.config.coin);
+                // [FIX 5] Global Exposure Cap (Liability Based)
+                // We track MAX potential liability if these positions go to $0 (or rather, if we are short options, but here linear)
+                // Simple View: Liability = The cost if we held to expiry and lost? No.
+                // Liability Risk: We used collateral. If trade goes against us, we have shares.
+                // The true risk constraint is: do we have too many active bets vs our bankroll?
+                // User requirement: "potentialLiability = max(yesShares, noShares) * 1.0"
+                // "potentialLoss <= walletBalance * riskPct"
+
                 const currentWalletBal = this.pnlManager.getAllStats().walletBalance;
 
-                // Safety fallback if wallet balance is 0 or missing (prevents division by zero or infinite trading)
+                // Sum global liability
+                const totalGlobalLiability = Array.from(this.activeMarkets.values()).reduce((acc, m) => {
+                    return acc + Math.max(m.position.yes.totalShares, m.position.no.totalShares);
+                }, 0);
+
+                // Safety fallback
                 if (currentWalletBal > 0) {
-                    if (coinStats.currentExposure > currentWalletBal * 0.30) {
-                        // We are over-exposed globally. Stop buying.
-                        if (Math.random() < 0.01) console.log(color("🛑 Global Exposure Cap Hit (30%). Pause.", COLORS.YELLOW));
+                    // Allow up to 50% of NAV to be tied up in max-loss liabilities
+                    // This is aggressive but safer than Cost Basis which shrinks as we spend.
+                    const maxAllowedLiab = currentWalletBal * 0.50;
+
+                    if (totalGlobalLiability > maxAllowedLiab) {
+                        if (Math.random() < 0.01) console.log(color(`🛑 Global Liability Cap Hit (${totalGlobalLiability.toFixed(0)} > ${maxAllowedLiab.toFixed(0)}). Pause.`, COLORS.YELLOW));
                         return;
                     }
                 }
@@ -1035,9 +1073,10 @@ export class DipArbStrategy implements Strategy {
                 // [FIX BUG 1] Infinite Trigger Guard
                 if (state.arbLocked) return;
 
-                // [FIX BUG 1 & 2] State Machine Transition which stops re-entry
+                // [FIX BUG 4] ARB_LOCKED should NOT close cycle (Premature Exit)
+                // Just lock buys, and let exit logic run (Partial/Late/Early).
                 state.arbLocked = true;
-                state.status = 'complete'; // Stop scanning, stop calling checks
+                // state.status = 'complete'; // REMOVED: Do not stop scanning logic!
 
                 // Calculate realized profit approximation (Matched Shares)
                 const matchedShares = Math.min(yes.totalShares, no.totalShares);
@@ -1051,7 +1090,8 @@ export class DipArbStrategy implements Strategy {
 
                 // Record as ARB_LOCKED with 0 realized PnL for now
                 // This is now safe because status='complete' prevents re-run.
-                this.pnlManager.closeCycle(state.marketId, "ARB_LOCKED", 0);
+                // [FIX ISSUE 1] Do NOT close cycle here. Exposure remains until Exit/Expiry.
+                // this.pnlManager.closeCycle(state.marketId, "ARB_LOCKED", 0);
 
                 this.logResult(state, pairCost, totalProfit);
             }
@@ -1085,6 +1125,9 @@ export class DipArbStrategy implements Strategy {
         if (!this.config.earlyExit?.enabled || !this.clobClient) return;
         // [STRICT GUARD] Must be holding/active (scanning) and not already exiting
         if (state.status !== 'scanning') return;
+
+        // [FIX ISSUE 3] Disable Early Exit if Arb Locked (Hold to Expiry)
+        if (state.arbLocked) return;
 
         const yes = state.position.yes;
         const no = state.position.no;
@@ -1343,6 +1386,14 @@ export class DipArbStrategy implements Strategy {
 
             const minWinnerPrice = this.config.partialUnwind.minWinnerPrice || 0.70;
             if (winnerPrice < minWinnerPrice) return;
+
+            // [FIX 4] Partial Unwind Symmetry Guard (P0)
+            // Do NOT sell winner if loser is still expensive (we are essentially naked shorting likelihood logic)
+            // Require Loser < 0.20 (Cheap Optionality)
+            const loserPrice = isYesWinner ? bestBidNo : bestBidYes;
+            if (loserPrice > 0.20) {
+                return;
+            }
 
             // 3. Profit Check (Winner Only)
             const sharesToSell = winnerSideState.totalShares;
