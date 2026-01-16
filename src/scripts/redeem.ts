@@ -143,8 +143,9 @@ export async function redeemPositions(options: { dryRun?: boolean; forceEOA?: bo
     console.log(`\nFetching positions for ${userAddress}...`);
     let positions: Position[] = [];
     try {
+        // [FIX] Remove 'redeemable=true' to ensure we fetch LOST trades too (for cleanup)
         const response = await fetch(
-            `https://data-api.polymarket.com/positions?user=${userAddress}&redeemable=true&limit=100`
+            `https://data-api.polymarket.com/positions?user=${userAddress}&limit=100` // Removed &redeemable=true
         );
         if (!response.ok) throw new Error(`Data API Error: ${response.statusText}`);
 
@@ -169,7 +170,7 @@ export async function redeemPositions(options: { dryRun?: boolean; forceEOA?: bo
         return;
     }
 
-    console.log(`Found ${positions.length} redeemable positions.`);
+    console.log(`Found ${positions.length} total positions.`);
 
     // ============ Process & Analyze Markets ============
     const marketsToProcess: ProcessedMarket[] = [];
@@ -198,6 +199,14 @@ export async function redeemPositions(options: { dryRun?: boolean; forceEOA?: bo
             // Skip if no actual balance (dust check)
             if (yBal < 0.000001 && nBal < 0.000001) {
                 // console.log(`  ${title.slice(0, 30)}... - No balance, skipping`);
+                continue;
+            }
+
+            // [FIX] Filter out Active Markets (Unresolved)
+            // Since we fetch ALL positions now, we must ensure we only touch resolved ones.
+            const res = await ctf.getMarketResolution(conditionId);
+            if (!res.isResolved) {
+                // console.log(`  ${title.slice(0, 30)}... - Not resolved, skipping`);
                 continue;
             }
 
