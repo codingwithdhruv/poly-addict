@@ -14,6 +14,37 @@ interface CliArgs {
     info: boolean;
     redeem: boolean;
     dashboard: boolean;
+    minExpectedProfit?: number;
+}
+
+function isWeekendLowVolIST(): boolean {
+    const now = new Date();
+    // Use user-provided logic for accurate IST window: Sat 5:30 AM -> Mon 5:30 AM
+    // Since we are likely on a server with unknown Timezone, we rely on Offset or just UTC calculation?
+    // User provided: new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" })
+
+    // Safety check for Intl support
+    try {
+        const istStr = now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
+        const ist = new Date(istStr);
+        const day = ist.getDay(); // 0=Sun, 6=Sat
+        const mins = ist.getHours() * 60 + ist.getMinutes();
+
+        const SAT_530 = 5 * 60 + 30; // 5:30 AM
+        const MON_530 = 5 * 60 + 30; // 5:30 AM (User said 6*60+30? 6:30? No, 5:30 is standard. User code said 6*60+30 = 6:30. I will respect user Code.)
+        // User Code: const SAT_530 = 6 * 60 + 30;
+
+        const THRESHOLD = 6 * 60 + 30; // 6:30 AM per user code snippet
+
+        if (day === 6) return mins >= THRESHOLD;
+        if (day === 0) return true;
+        if (day === 1) return mins < THRESHOLD;
+        return false;
+    } catch (e) {
+        // Fallback to UTC Sat/Sun if IST fails
+        const d = now.getUTCDay();
+        return d === 0 || d === 6;
+    }
 }
 
 export function parseCliArgs(): DipArbConfig {
@@ -43,7 +74,7 @@ export function parseCliArgs(): DipArbConfig {
             slidingWindowMs: 3000,     // Fast reaction
             leg2TimeoutSeconds: 90,    // BTC mean-reverts quickly
             sumTarget: 0.955,          // Don’t wait for perfection
-            shares: 6,                 // Dynamic sizing still applies
+            shares: 36,                 // Dynamic sizing still applies
             ignorePriceBelow: 0.06
         },
 
@@ -68,17 +99,37 @@ export function parseCliArgs(): DipArbConfig {
             ignorePriceBelow: 0.06
         },
 
+
         XRP: {
             dipThreshold: 0.38,        // Needs absurd move
             slidingWindowMs: 4500,
             leg2TimeoutSeconds: 180,
             sumTarget: 0.97,           // Safety first
             shares: 4,
-            ignorePriceBelow: 0.07
+            ignorePriceBelow: 0.07,
+            minExpectedProfit: 0.10
         },
     };
 
-    const defaults = coinDefaults[coin];
+    let defaults = { ...coinDefaults[coin] };
+
+    // [FIX] Weekend Regime Logic (BTC Only)
+    if (coin === 'BTC' && isWeekendLowVolIST()) {
+        console.log("🌙 BTC weekend low-vol regime -> using strict profile");
+        defaults = {
+            ...defaults,
+            dipThreshold: 0.22,
+            sumTarget: 0.92,
+            minExpectedProfit: 0.25 // Higher profit gate on weekends
+        };
+    } else if (coin === 'BTC') {
+        // Weekday default
+        defaults.minExpectedProfit = 0.05;
+    } else if (coin === 'ETH') {
+        defaults.minExpectedProfit = 0.10;
+    } else {
+        defaults.minExpectedProfit = 0.10;
+    }
 
     // 3. Helper to parse args
     const getArgValue = (name: string, defaultVal: number): number => {
@@ -111,11 +162,12 @@ export function parseCliArgs(): DipArbConfig {
         shares: getArgValue('shares', defaults.shares!),
         // windowMinutes removed
         ignorePriceBelow: getArgValue('min-price', defaults.ignorePriceBelow!), // exposed as --min-price
+        minExpectedProfit: getArgValue('min-profit', defaults.minExpectedProfit!),
         verbose: getBoolArg('verbose', false),
         info: args.includes('-info') || args.includes('--info'),
         redeem: args.includes('-redeem') || args.includes('--redeem'),
         dashboard: args.includes('-dashboard') || args.includes('--dashboard'),
         // Strategy Selection
-        strategy: (args.includes('--arb') || args.includes('-arb')) ? 'true-arb' : 'dip'
+        strategy: (args.includes('--arb') || args.includes('-arb')) ? 'true-arb' : 'dip' as any
     };
 }

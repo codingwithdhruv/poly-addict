@@ -210,7 +210,13 @@ export async function redeemPositions(options: { dryRun?: boolean; forceEOA?: bo
                 continue;
             }
 
-            const mergeAmount = Math.min(yBal, nBal);
+            let mergeAmount = Math.min(yBal, nBal);
+
+            // [FIX] Efficiency: Don't merge dust (< 0.50). Just redeem (or burn) later.
+            if (mergeAmount < 0.50) {
+                mergeAmount = 0;
+            }
+
             // Check if we need to call redeem methods (if remaining balance > dust)
             const remainingYes = yBal - mergeAmount;
             const remainingNo = nBal - mergeAmount;
@@ -382,7 +388,7 @@ async function resolveTokenIds(conditionId: string, posList: Position[]): Promis
     return null;
 }
 
-// Allow direct execution
-if (import.meta.url === `file://${process.argv[1]}`) {
+// ESM-safe check for direct execution
+if (process.argv[1] && (process.argv[1].endsWith('redeem.js') || process.argv[1].endsWith('redeem.ts'))) {
     redeemPositions().catch(console.error);
 }

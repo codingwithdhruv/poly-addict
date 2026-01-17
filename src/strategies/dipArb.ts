@@ -134,7 +134,8 @@ export interface DipArbConfig {
     info?: boolean;
     redeem?: boolean;
     dashboard?: boolean;
-    strategy?: string;
+    strategy?: 'dip' | 'true-arb';
+    minExpectedProfit?: number; // [FIX] Minimum Edge Gate
     earlyExit?: EarlyExitConfig;
     lateExit?: LateExitConfig;
     partialUnwind?: PartialUnwindConfig;
@@ -778,15 +779,29 @@ export class DipArbStrategy implements Strategy {
                 return;
             }
 
-            // [FIX BTC] Tuning
-            // BTC enters 90% of markets due to noise. Increase threshold for BTC.
-            let effectiveThreshold = this.config.dipThreshold;
-            if (this.config.coin === 'BTC') {
-                effectiveThreshold = effectiveThreshold * 1.5; // Stricter for BTC
-            }
+            // [CONFIG] Threshold handled by args.ts (Weekend vs Weekday)
 
             const drop = (highPrice - currentPrice) / highPrice;
-            if (drop >= effectiveThreshold) {
+            if (drop >= this.config.dipThreshold) {
+
+                // [FIX] Minimum Profit Floor (Anti-Garbage Filter)
+                // We want to avoid trades that yield < $0.25 even if successful.
+                // Est Profit = (1.0 - EffectiveSumTarget) * Shares
+                // EffectiveSumTarget logic handled by config
+                const effectiveSumTarget = this.config.sumTarget;
+
+                // Quick Sizing Estimate
+                const walletBal = this.pnlManager.getAllStats().walletBalance || 100; // Fallback
+                const liabilityCap = walletBal * (walletBal < 20 ? 0.50 : 0.15);
+                const estShares = Math.floor(liabilityCap / 1.0); // Conservative (max liability is $1/share)
+
+                const profitEdge = 1.0 - effectiveSumTarget;
+                const estTotalProfit = estShares * profitEdge;
+
+                const minProfit = this.config.minExpectedProfit || 0.05;
+                if (estTotalProfit < minProfit) {
+                    return;
+                }
 
                 // [FIX ENTRY] Stabilization / Bounce Check (P0)
                 // We need at least one uptik or flat period from the bottom
@@ -836,7 +851,16 @@ export class DipArbStrategy implements Strategy {
 
                 // Sum global liability
                 const totalGlobalLiability = Array.from(this.activeMarkets.values()).reduce((acc, m) => {
-                    return acc + Math.max(m.position.yes.totalShares, m.position.no.totalShares);
+                    const pYesStr = this.getLastPrice(m, 0);
+                    const pNoStr = this.getLastPrice(m, 1);
+                    const pYes = parseFloat(pYesStr) || 1.0; // Fallback to 1.0 (Worst Case)
+                    const pNo = parseFloat(pNoStr) || 1.0;
+
+                    const valYes = m.position.yes.totalShares * pYes;
+                    const valNo = m.position.no.totalShares * pNo;
+
+                    // [Refinement] Track Value at Risk (VaR) roughly
+                    return acc + Math.max(valYes, valNo);
                 }, 0);
 
                 // Safety fallback
@@ -1069,6 +1093,7 @@ export class DipArbStrategy implements Strategy {
                 state.lastImproveTs = Date.now();
             }
 
+            // [CHECK TARGET]
             if (pairCost <= this.config.sumTarget) {
                 // [FIX BUG 1] Infinite Trigger Guard
                 if (state.arbLocked) return;
@@ -1092,6 +1117,9 @@ export class DipArbStrategy implements Strategy {
                 // This is now safe because status='complete' prevents re-run.
                 // [FIX ISSUE 1] Do NOT close cycle here. Exposure remains until Exit/Expiry.
                 // this.pnlManager.closeCycle(state.marketId, "ARB_LOCKED", 0);
+
+                // [FIX ISSUE 5] Record Status Intent
+                this.pnlManager.updateCycleStatus(state.marketId, 'ARB_LOCKED');
 
                 this.logResult(state, pairCost, totalProfit);
             }
@@ -1442,11 +1470,12 @@ export class DipArbStrategy implements Strategy {
             // [FIX] Log Realized Profit immediately
             this.pnlManager.logPartialProfit(state.marketId, totalWinnerProfit);
 
-            // [FIX 3] Sync Exposure
+            // [FIX] Sync Exposure
             this.pnlManager.updateCycleCost(state.marketId, state.position.yes.totalCost, state.position.no.totalCost);
 
-            // We do NOT zero out the loser side. We keep it.
-            // We do NOT close the cycle. The cycle is still open until expiry or manual redemption.
+            // [FIX ISSUE 3] Ghost Cycle Prevention
+            // Lock cycle to prevent re-entry. Only expiry logic should run now (we hold loser as lottery ticket).
+            state.arbLocked = true;
 
             console.log(color("   ✅ Partial Unwind Complete. Winner sold. Loser held.", COLORS.GREEN));
 

@@ -40,6 +40,7 @@ interface GlobalState {
     activeCycles: Record<string, CycleStats>; // marketId -> stats
     walletBalance: number; // Last seen wallet balance
     startingBalance: number; // Session start balance (or first see)
+    maxEquity: number; // High-water mark for equity (Wallet + OpenRisk)
     lastUpdate: number;
 }
 
@@ -65,6 +66,7 @@ export class PnlManager {
             activeCycles: {},
             walletBalance: 0,
             startingBalance: 0,
+            maxEquity: 0,
             lastUpdate: Date.now()
         };
     }
@@ -90,13 +92,31 @@ export class PnlManager {
         if (this.state.startingBalance === 0 && bal > 0) {
             this.state.startingBalance = bal;
         }
+
+        // [FIX DRAWDOWN] Track High-Water Mark Equity
+        // Equity = Wallet + Current Exposure (Cost Basis Approx)
+        let totalExp = 0;
+        Object.values(this.state.activeCycles).forEach(c => totalExp += (c.yesCost + c.noCost));
+
+        const currentEquity = bal + totalExp;
+        if (this.state.maxEquity < currentEquity) {
+            this.state.maxEquity = currentEquity;
+        }
+
         this.save();
     }
 
     public checkDrawdown(limitPct: number): boolean {
         this.sync();
-        if (this.state.startingBalance <= 0) return false;
-        const drop = (this.state.startingBalance - this.state.walletBalance) / this.state.startingBalance;
+        // Use Max Equity HWM
+        if (this.state.maxEquity <= 0) return false;
+
+        // Recalc current equity
+        let totalExp = 0;
+        Object.values(this.state.activeCycles).forEach(c => totalExp += (c.yesCost + c.noCost));
+        const currentEquity = this.state.walletBalance + totalExp;
+
+        const drop = (this.state.maxEquity - currentEquity) / this.state.maxEquity;
         return drop > limitPct;
     }
 
@@ -152,6 +172,15 @@ export class PnlManager {
 
             const coinStats = this.getCoinStats(coin);
             coinStats.currentExposure = totalExp;
+        }
+        this.save();
+    }
+
+    public updateCycleStatus(marketId: string, status: PnlReason | 'OPEN') {
+        this.sync();
+        const cycle = this.state.activeCycles[marketId];
+        if (cycle) {
+            cycle.status = status as any;
         }
         this.save();
     }
