@@ -77,7 +77,7 @@ interface MarketState {
     // Helper to map tokenId to 'yes' or 'no'
     tokenIdToSide: Map<string, 'yes' | 'no'>;
 
-    status: 'scanning' | 'complete' | 'EXITING' | 'partial_unwind';
+    status: 'scanning' | 'complete' | 'exiting' | 'partial_unwind';
     endTime: number;
     startTime: number;
     slug: string;
@@ -122,6 +122,14 @@ export interface EarlyExitConfig {
     maxSlippagePct: number; // e.g. 0.03
 }
 
+export interface MakerBiasConfig {
+    enabled: boolean;
+    minPrice: number;       // e.g. 0.35 (Maker Zone Start)
+    maxPrice: number;       // e.g. 0.65 (Maker Zone End)
+    passiveFirst: boolean;  // Try limit order first?
+    fallbackMs: number;     // If not filled, take aggressiveness after X ms
+}
+
 export interface DipArbConfig {
     coin: string;
     dipThreshold: number;      // movePct
@@ -136,6 +144,7 @@ export interface DipArbConfig {
     dashboard?: boolean;
     strategy?: 'dip' | 'true-arb';
     minExpectedProfit?: number; // [FIX] Minimum Edge Gate
+    makerBias?: MakerBiasConfig; // [NEW] Maker Rebate Logic
     earlyExit?: EarlyExitConfig;
     lateExit?: LateExitConfig;
     partialUnwind?: PartialUnwindConfig;
@@ -217,6 +226,35 @@ export class DipArbStrategy implements Strategy {
         }
 
         this.logHeader();
+
+        // [FIX 2] WalletGuard Seeding on Startup
+        // Fetch current positions to avoid over-trading on restart
+        try {
+            // NOTE: ClobClient does not have getPositions() in this version.
+            // We cannot easily reconcile settled shares without CTF contract calls.
+            // However, we CAN and MUST reconcile OPEN ORDERS to seed WalletGuard risk.
+
+            // Fetch Open Orders
+            const openOrders = await this.clobClient.getOpenOrders();
+            let existingRisk = 0;
+            const orders = (openOrders as any).orders || openOrders; // Handle array or wrapped
+
+            if (Array.isArray(orders)) {
+                orders.forEach((o: any) => {
+                    if (o.side === 'BUY') {
+                        const cost = parseFloat(o.size) * parseFloat(o.price);
+                        existingRisk += cost;
+                    }
+                });
+            }
+
+            if (existingRisk > 0) {
+                console.log(color(`🔒 Seeding WalletGuard with Open Orders: $${existingRisk.toFixed(2)}`, COLORS.MAGENTA));
+                WalletGuard.registerExistingExposure(existingRisk);
+            }
+        } catch (e) {
+            console.error("Failed to seed WalletGuard:", e);
+        }
     }
 
     /**
@@ -489,10 +527,10 @@ export class DipArbStrategy implements Strategy {
             const timeLeft = Math.round((state.endTime - now) / 1000);
 
             // [SAFETY] Race Condition Guard
-            // [FIX 3] RELAX GUARD to allow exits to process even if status is 'EXITING' or 'partial_unwind'
+            // [FIX 3] RELAX GUARD to allow exits to process even if status is 'exiting' or 'partial_unwind'
             // We ONLY skip if status is 'complete' (meaning totally dead/waiting)
             // [SAFETY] Race Condition Guard
-            // [FIX 3] RELAX GUARD to allow exits to process even if status is 'EXITING' or 'partial_unwind'
+            // [FIX 3] RELAX GUARD to allow exits to process even if status is 'exiting' or 'partial_unwind'
             // We ONLY skip if status is 'complete' (meaning totally dead/waiting)
             if (state.status === 'complete') continue;
 
@@ -670,6 +708,8 @@ export class DipArbStrategy implements Strategy {
         return foundMarkets;
     }
 
+
+
     async run(): Promise<void> {
         if (this.config.redeem) {
             console.log(color("\n[REDEEM MODE] Starting redemption process...", COLORS.MAGENTA));
@@ -784,19 +824,34 @@ export class DipArbStrategy implements Strategy {
             const drop = (highPrice - currentPrice) / highPrice;
             if (drop >= this.config.dipThreshold) {
 
-                // [FIX] Minimum Profit Floor (Anti-Garbage Filter)
+                // [FIX] Minimum Profit Floor (Anti-Garbage Filter) & [NEW] Maker Rebate Logic
                 // We want to avoid trades that yield < $0.25 even if successful.
-                // Est Profit = (1.0 - EffectiveSumTarget) * Shares
-                // EffectiveSumTarget logic handled by config
                 const effectiveSumTarget = this.config.sumTarget;
+
+                // [NEW] Maker Zone Logic
+                const makerConf = this.config.makerBias || { enabled: false, minPrice: 0.35, maxPrice: 0.65 };
+                const inMakerZone = makerConf.enabled && currentPrice >= makerConf.minPrice && currentPrice <= makerConf.maxPrice;
 
                 // Quick Sizing Estimate
                 const walletBal = this.pnlManager.getAllStats().walletBalance || 100; // Fallback
                 const liabilityCap = walletBal * (walletBal < 20 ? 0.50 : 0.15);
-                const estShares = Math.floor(liabilityCap / 1.0); // Conservative (max liability is $1/share)
+                let estShares = Math.floor(liabilityCap / 1.0); // Conservative (max liability is $1/share)
+
+                // [NEW] Maker Sizing Multiplier
+                if (makerConf.enabled) {
+                    const sizeMultiplier = inMakerZone ? 1.5 : 0.6; // Aggressive in zone, timid outside
+                    estShares = Math.floor(estShares * sizeMultiplier);
+                }
 
                 const profitEdge = 1.0 - effectiveSumTarget;
-                const estTotalProfit = estShares * profitEdge;
+                let estTotalProfit = estShares * profitEdge;
+
+                // [NEW] Add Estimated Rebate (approx 0.2% of Volume if Maker)
+                // We assume 50% fill rate as maker if in zone
+                if (inMakerZone) {
+                    const estRebate = (estShares * currentPrice) * 0.002;
+                    estTotalProfit += estRebate;
+                }
 
                 const minProfit = this.config.minExpectedProfit || 0.05;
                 if (estTotalProfit < minProfit) {
@@ -927,9 +982,23 @@ export class DipArbStrategy implements Strategy {
                 sideState.isBuying = true;
 
                 try {
+                    // [NEW] Maker Bias Sizing
+                    const makerConf = this.config.makerBias || { enabled: false, minPrice: 0.35, maxPrice: 0.65 };
+                    const inMakerZone = makerConf.enabled && currentPrice >= makerConf.minPrice && currentPrice <= makerConf.maxPrice;
+                    const sizeMult = (makerConf.enabled && inMakerZone) ? 1.5 : (makerConf.enabled ? 0.6 : 1.0);
+                    const txShares = Math.floor(this.config.shares * sizeMult);
+
                     // Execute BUY - returns filled shares
                     // [RISK REFINED] Pass currentSideCost for logging, but logic handled inside
-                    const filledShares = await this.executeOrder(tokenId, this.config.shares, currentPrice, `BUY ${sideUpper}`);
+                    // [NEW] Pass passiveFirst=true if in Maker Zone
+                    const filledShares = await this.executeOrder(
+                        tokenId,
+                        txShares,
+                        currentPrice,
+                        `BUY ${sideUpper}`,
+                        false, // bypassRisk
+                        (makerConf.enabled && makerConf.passiveFirst && inMakerZone) // passiveFirst
+                    );
 
                     if (filledShares > 0) {
                         sideState.buysTriggered++;
@@ -973,12 +1042,14 @@ export class DipArbStrategy implements Strategy {
         } catch (e) { }
     }
 
+
     private async executeOrder(
         tokenId: string,
         requestedShares: number,
         price: number,
         label: string,
-        bypassRisk: boolean = false // [NEW] Allow force hedges to exceed 5% cap
+        bypassRisk: boolean = false, // [NEW] Allow force hedges to exceed 5% cap
+        passiveFirst: boolean = false // [NEW] Maker Bias
     ): Promise<number> {
         if (!this.clobClient) return 0;
 
@@ -988,23 +1059,17 @@ export class DipArbStrategy implements Strategy {
 
         // [RISK] Risk Cap Logic (Dynamic)
         // If wallet < $20, allow 50% risk (Aggressive Degen Mode).
-        // Otherwise, stick to 15% for safety.
-        // User requested strict adherence to this cap for TOTAL hedge cost.
         const riskPct = availableUsd < 20 ? 0.50 : 0.15;
 
         let maxSharesRisk = requestedShares;
 
         if (!bypassRisk) {
             const maxLiabilityUsd = availableUsd * riskPct;
-
-            // [FIX] Strict Liability-Based Sizing
-            // Total "Hedge Budget" is 25% of wallet (e.g. $3.25).
-            // This budget must cover the entire potential liability ($1.00/share).
             const liabilityPrice = 1.0;
             maxSharesRisk = Math.floor(maxLiabilityUsd / liabilityPrice);
 
             if (maxSharesRisk <= 0) {
-                console.log(color(`[${label}] Risk Check Failed: Bal $${availableUsd.toFixed(2)} too low for liability sizing (Max shares: ${maxSharesRisk})`, COLORS.RED));
+                console.log(color(`[${label}] Risk Check Failed: Bal $${availableUsd.toFixed(2)} too low`, COLORS.RED));
                 return 0;
             }
         } else {
@@ -1013,18 +1078,13 @@ export class DipArbStrategy implements Strategy {
         }
 
         // [FIX] Dynamic Min-Size Fetching
-        // CLOB often enforces min sizes > 1 share. We must check.
         let minShares = 1;
         try {
             const book = await this.clobClient.getOrderBook(tokenId);
-            // API usually returns 'min_order_size' or similar. 
-            // Based on user logs: "Size (2) lower than the minimum: 5"
-            // We'll trust the book object.
             if ((book as any).min_order_size) {
                 minShares = parseFloat((book as any).min_order_size);
             }
         } catch (e) {
-            console.log(color(`[${label}] Failed to fetch min size, defaulting to 1`, COLORS.YELLOW));
         }
 
         let finalShares = Math.min(requestedShares, maxSharesRisk);
@@ -1035,19 +1095,8 @@ export class DipArbStrategy implements Strategy {
             return 0;
         }
 
-        // Final sanity check
         if (finalShares < minShares && !bypassRisk) return 0;
-
-        // For forced hedge...
-        if (finalShares < minShares) {
-            if (bypassRisk) {
-                // Try to force Min Size for hedge if we are close?
-                // No, if we can't afford it, likely rejection.
-                if (finalShares <= 0) return 0;
-            } else {
-                return 0;
-            }
-        }
+        if (finalShares < minShares && bypassRisk && finalShares <= 0) return 0;
 
         const exactCost = finalShares * price;
 
@@ -1057,6 +1106,50 @@ export class DipArbStrategy implements Strategy {
         }
 
         try {
+            // [NEW] MAKER-FIRST EXECUTION
+            if (passiveFirst) {
+                try {
+                    const book = await this.clobClient.getOrderBook(tokenId);
+                    if (book.bids.length > 0) {
+                        const bestBid = parseFloat(book.bids[0].price);
+                        // Target: BestBid + 0.01 (Frontrun) but Cap at Limit Price - 0.01 (Spread)
+                        let makerPrice = bestBid + 0.01;
+                        if (makerPrice >= price) makerPrice = price - 0.01;
+
+                        if (makerPrice > 0) {
+                            console.log(color(`[${label}] 🌬️ Trying Maker Order ${finalShares} @ $${makerPrice.toFixed(2)}...`, COLORS.CYAN));
+                            const makerOrder = await this.clobClient.createAndPostOrder(
+                                { tokenID: tokenId, price: makerPrice, side: Side.BUY, size: finalShares },
+                                { tickSize: "0.01" }
+                            );
+
+                            if (makerOrder?.orderID) {
+                                // Wait for fill (Fallback)
+                                const delay = this.config.makerBias?.fallbackMs || 400;
+                                await new Promise(r => setTimeout(r, delay));
+
+                                // Cancel and check (simplistic fallback)
+                                // [FIX] getOpenOrders doesn't support orderID filter in some SDK versions. Fetch all.
+                                const openOrders = await this.clobClient.getOpenOrders();
+                                const myOrder = (openOrders as any[]).find(o => o.orderID === makerOrder.orderID);
+
+                                if (!myOrder) {
+                                    // It filled (or cancelled externally). Assume filled.
+                                    console.log(color(`[${label}] Maker Order assumed filled/gone.`, COLORS.GREEN));
+                                    return finalShares;
+                                } else {
+                                    // Still open. Cancel.
+                                    console.log(color(`[${label}] Maker Timeout. Cancelling & Crossing...`, COLORS.YELLOW));
+                                    await this.clobClient.cancelOrder({ orderID: makerOrder.orderID });
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.log(color(`[${label}] Maker attempt failed: ${e}`, COLORS.DIM));
+                }
+            }
+
             console.log(color(`[${label}] BUY ${finalShares} @ $${price}`, COLORS.CYAN));
 
             const order = await this.clobClient.createAndPostOrder(
@@ -1079,7 +1172,7 @@ export class DipArbStrategy implements Strategy {
     }
 
     private checkPairCost(state: MarketState) {
-        if (state.status === 'complete' || state.status === 'EXITING' || state.status === 'partial_unwind') return; // Strict Guard
+        if (state.status === 'complete' || state.status === 'exiting' || state.status === 'partial_unwind') return; // Strict Guard
 
         const yes = state.position.yes;
         const no = state.position.no;
@@ -1098,7 +1191,7 @@ export class DipArbStrategy implements Strategy {
                 // [FIX BUG 1] Infinite Trigger Guard
                 if (state.arbLocked) return;
 
-                // [FIX BUG 4] ARB_LOCKED should NOT close cycle (Premature Exit)
+                // [FIX BUG 4] arb_locked should NOT close cycle (Premature Exit)
                 // Just lock buys, and let exit logic run (Partial/Late/Early).
                 state.arbLocked = true;
                 // state.status = 'complete'; // REMOVED: Do not stop scanning logic!
@@ -1109,17 +1202,16 @@ export class DipArbStrategy implements Strategy {
                 const totalProfit = matchedShares * profitPerPair;
 
                 // Update PnL Manager
-                // [FIX] Convert Sum Target Win to ARB_LOCKED (Unrealized)
+                // [FIX] Convert Sum Target Win to arb_locked (Unrealized)
                 // We do NOT add profit here because it is not realized until redemption.
                 console.log(color("✅ SUM TARGET HIT! Locking Arb for Expiry.", COLORS.GREEN));
 
-                // Record as ARB_LOCKED with 0 realized PnL for now
+                // Record as arb_locked with 0 realized PnL for now
                 // This is now safe because status='complete' prevents re-run.
                 // [FIX ISSUE 1] Do NOT close cycle here. Exposure remains until Exit/Expiry.
-                // this.pnlManager.closeCycle(state.marketId, "ARB_LOCKED", 0);
+                // this.pnlManager.closeCycle(state.marketId, "arb_locked", 0);
 
                 // [FIX ISSUE 5] Record Status Intent
-                this.pnlManager.updateCycleStatus(state.marketId, 'ARB_LOCKED');
 
                 this.logResult(state, pairCost, totalProfit);
             }
@@ -1180,6 +1272,25 @@ export class DipArbStrategy implements Strategy {
             const bestBidYes = parseFloat(yesBook.bids[0].price);
             const bestBidNo = parseFloat(noBook.bids[0].price);
 
+            // [NEW] MAKER RETENTION: Skip Early Exit if in Maker Zone & Held < 30s
+            const makerConf = this.config.makerBias || { enabled: false, minPrice: 0.35, maxPrice: 0.65 };
+            if (makerConf.enabled) {
+                // Check if either side is in the rebate-rich zone
+                const inZone = (bestBidYes >= makerConf.minPrice && bestBidYes <= makerConf.maxPrice) ||
+                    (bestBidNo >= makerConf.minPrice && bestBidNo <= makerConf.maxPrice);
+
+                if (inZone) {
+                    const firstBuy = Math.min(yes.firstBuyTs || Date.now(), no.firstBuyTs || Date.now());
+                    const timeHeld = Date.now() - firstBuy;
+
+                    // If held less than 30s, don't take liquidity yet. Wait for maker fills or longer hold.
+                    if (timeHeld < 30000) {
+                        // console.log(color(`[Maker] In Zone (${bestBidYes}, ${bestBidNo}) & Held ${timeHeld/1000}s. Skipping Early Exit.`, COLORS.DIM));
+                        return;
+                    }
+                }
+            }
+
             // 3. Profit & Slippage Check
             const exitValue = bestBidYes + bestBidNo;
             const entryCost = yes.avgPrice + no.avgPrice;
@@ -1195,7 +1306,7 @@ export class DipArbStrategy implements Strategy {
             console.log(color(`\n💰 EARLY EXIT VALID: +${(profitPct * 100).toFixed(1)}% ($${totalProfitUsd.toFixed(2)})`, COLORS.BRIGHT + COLORS.GREEN));
 
             // LOCK STATE IMMEDIATELY
-            state.status = 'EXITING';
+            state.status = 'exiting';
 
             // Determine Order: Sell Thinner Side First
             // Strategy: Calculate total depth at best price, sell lower depth first.
@@ -1326,7 +1437,7 @@ export class DipArbStrategy implements Strategy {
             console.log(color(`\n⚡ LATE DOMINANCE EXIT TRIGGERED (${(timeLeftMs / 1000).toFixed(1)}s left)`, COLORS.BRIGHT + COLORS.MAGENTA));
             console.log(color(`   Winner: ${winnerPrice.toFixed(2)} | Loser: ${loserPrice.toFixed(2)} | Profit: $${totalProfitUsd.toFixed(2)}`, COLORS.MAGENTA));
 
-            state.status = 'EXITING';
+            state.status = 'exiting';
 
             // Identify IDs
             // Assume YES is token 0, NO is token 1

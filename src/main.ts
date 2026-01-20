@@ -26,6 +26,7 @@ function color(text: string, colorCode: string): string {
 }
 
 async function main() {
+    console.log("🚀 NEW CODE DEPLOYED", Date.now());
     const args = parseCliArgs();
 
     // --- STANDALONE DASHBOARD MODE ---

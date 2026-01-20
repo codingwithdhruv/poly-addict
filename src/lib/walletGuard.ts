@@ -44,4 +44,11 @@ export class WalletGuard {
     static reset() {
         this.reserved = 0;
     }
+
+    /**
+     * Registers existing exposure (e.g. on restart) to ensure it is accounted for.
+     */
+    static registerExistingExposure(amount: number) {
+        this.reserved += amount;
+    }
 }

@@ -151,16 +151,20 @@ pm2 delete all    # Clear list
 | Flag | Description | Default (ETH) | Example |
 | :--- | :--- | :--- | :--- |
 | **Asset Selection** | | | |
-| `--eth`, `--btc`, `--sol` | Selects target asset market | ETH | `./trade --btc` |
+| `--eth`, `--btc`, `--sol`, `--xrp` | Selects target asset market | ETH | `./trade --btc` |
 | **Strategy Params** | | | |
 | `--dip` | Price drop % to trigger buy (0.15 = 15%) | 0.25 | `--dip=0.15` |
 | `--target` | Sum Target to exit (AvgYes + AvgNo) | 0.96 | `--target=0.98` |
 | `--shares` | Max shares per clip (subject to Risk Cap) | 5 | `--shares=100` |
 | `--timeout` | Leg 2 max wait before Force Hedge (seconds) | 60 | `--timeout=45` |
 | `--window` | Sliding window for dip detection (ms) | 3000 | `--window=2000` |
+| `--min-price` | Ignore prices below this (avoid dust/noise) | 0.06 | `--min-price=0.10` |
+| `--min-profit` | Min Expected Profit ($) to take a trade | varies | `--min-profit=0.50` |
 | **Global** | | | |
 | `--verbose` | Enable debug logs | false | `--verbose` |
 | `--arb` | Switch to Atomic Arb Strategy | false | `--arb` |
+
+> **Note (BTC Weekend Regime):** The bot automatically detects low-volatility weekend periods for BTC and switches to a stricter profile (Higher profit req, lower sum target) to avoid stagnation.
 
 ---
 

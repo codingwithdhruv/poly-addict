@@ -75,7 +75,8 @@ export function parseCliArgs(): DipArbConfig {
             leg2TimeoutSeconds: 90,    // BTC mean-reverts quickly
             sumTarget: 0.955,          // Don’t wait for perfection
             shares: 36,                 // Dynamic sizing still applies
-            ignorePriceBelow: 0.06
+            ignorePriceBelow: 0.06,
+            makerBias: { enabled: true, minPrice: 0.35, maxPrice: 0.65, passiveFirst: true, fallbackMs: 500 }
         },
 
         ETH: {
@@ -84,7 +85,8 @@ export function parseCliArgs(): DipArbConfig {
             leg2TimeoutSeconds: 150,   // Hedge takes longer
             sumTarget: 0.96,           // Defensive
             shares: 5,
-            ignorePriceBelow: 0.06
+            ignorePriceBelow: 0.06,
+            makerBias: { enabled: true, minPrice: 0.35, maxPrice: 0.65, passiveFirst: true, fallbackMs: 500 }
         },
 
         SOL: {
@@ -96,7 +98,8 @@ export function parseCliArgs(): DipArbConfig {
             leg2TimeoutSeconds: 120,
             sumTarget: 0.96,
             shares: 5,
-            ignorePriceBelow: 0.06
+            ignorePriceBelow: 0.06,
+            makerBias: { enabled: true, minPrice: 0.35, maxPrice: 0.65, passiveFirst: true, fallbackMs: 500 }
         },
 
 
@@ -107,7 +110,8 @@ export function parseCliArgs(): DipArbConfig {
             sumTarget: 0.97,           // Safety first
             shares: 4,
             ignorePriceBelow: 0.07,
-            minExpectedProfit: 0.10
+            minExpectedProfit: 0.10,
+            makerBias: { enabled: true, minPrice: 0.35, maxPrice: 0.65, passiveFirst: true, fallbackMs: 500 }
         },
     };
 
@@ -119,16 +123,25 @@ export function parseCliArgs(): DipArbConfig {
         defaults = {
             ...defaults,
             dipThreshold: 0.22,
+            slidingWindowMs: 2500, // [TUNE] Reduce window for noise
+            leg2TimeoutSeconds: 120, // [TUNE] Increase for slower fills
             sumTarget: 0.92,
-            minExpectedProfit: 0.25 // Higher profit gate on weekends
+            minExpectedProfit: 0.25, // Higher profit gate on weekends
+            makerBias: {
+                enabled: true,
+                minPrice: 0.35,
+                maxPrice: 0.65,
+                passiveFirst: true,
+                fallbackMs: 800 // Slower fallback on weekends
+            }
         };
     } else if (coin === 'BTC') {
         // Weekday default
-        defaults.minExpectedProfit = 0.05;
+        defaults.minExpectedProfit = 0.25; // [TUNE] 0.25
     } else if (coin === 'ETH') {
-        defaults.minExpectedProfit = 0.10;
+        defaults.minExpectedProfit = 0.20; // [TUNE] 0.20
     } else {
-        defaults.minExpectedProfit = 0.10;
+        defaults.minExpectedProfit = 0.15; // [TUNE] 0.15 for SOL/XRP
     }
 
     // 3. Helper to parse args
@@ -168,6 +181,7 @@ export function parseCliArgs(): DipArbConfig {
         redeem: args.includes('-redeem') || args.includes('--redeem'),
         dashboard: args.includes('-dashboard') || args.includes('--dashboard'),
         // Strategy Selection
-        strategy: (args.includes('--arb') || args.includes('-arb')) ? 'true-arb' : 'dip' as any
+        strategy: (args.includes('--arb') || args.includes('-arb')) ? 'true-arb' : 'dip' as any,
+        makerBias: defaults.makerBias
     };
 }
