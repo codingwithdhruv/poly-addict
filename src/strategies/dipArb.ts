@@ -285,7 +285,19 @@ export class DipArbStrategy implements Strategy {
                         }
 
                         if (targetMarket) {
-                            console.log(color(`✅ Found market data for ${c.id}. Re-attaching...`, COLORS.GREEN));
+                            console.log(color(`✅ Found market data for ${c.id}. Checking expiry...`, COLORS.GREEN));
+
+                            // [FIX LOOP] Check if market is already expired
+                            const endTime = new Date(targetMarket.endTime || targetMarket.endDateIso).getTime();
+                            if (endTime <= Date.now()) {
+                                console.log(color(`⚠️ Market ${c.id} is already EXPIRED. Closing orphaned cycle (no resume).`, COLORS.YELLOW));
+                                this.pnlManager.closeCycle(c.id, 'EXPIRED', 0);
+                                // Retry to find NEW market
+                                setTimeout(() => this.rotateToNextMarket(), 1000);
+                                return;
+                            }
+
+                            console.log(color(`🔄 Re-attaching to ${c.id}...`, COLORS.MAGENTA));
 
                             // [FIX RESUMPTION PARSING]
                             let tokenIds: string[] = [];
@@ -313,7 +325,6 @@ export class DipArbStrategy implements Strategy {
                                 console.log(color("❌ Cannot parse tokens for resumption.", COLORS.RED));
                             } else {
                                 const startTime = new Date(targetMarket.startTime || targetMarket.startDateIso).getTime();
-                                const endTime = new Date(targetMarket.endTime || targetMarket.endDateIso).getTime();
 
                                 const tokenIdToSide = new Map<string, 'yes' | 'no'>();
                                 tokenIdToSide.set(tokenIds[0], 'yes');
@@ -616,6 +627,9 @@ export class DipArbStrategy implements Strategy {
             if (timeLeft <= 0) {
                 console.log(color(`[STATUS] Market ${state.slug} has ENDED.`, COLORS.YELLOW));
 
+                // [FIX CRITICAL] Stop PriceSocket updates immediately
+                state.status = 'complete';
+
                 // [FIX 4] Auto-Redeem on Expiry
                 try {
                     await redeemPositions();
@@ -633,6 +647,9 @@ export class DipArbStrategy implements Strategy {
                     this.pnlManager.closeCycle(state.marketId, 'EXPIRED', 0);
                     console.log(color("🧹 Cycle expired while watching. Closed cleanly.", COLORS.DIM));
                 }
+
+                // [FIX LOOP] Remove from activeMarkets so rotateToNextMarket doesn't try to forceClose it
+                this.activeMarkets.delete(state.marketId);
 
                 this.rotateToNextMarket();
                 return; // Exit loop, rotation handles reset
