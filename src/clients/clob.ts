@@ -5,7 +5,10 @@ import { CONFIG } from "./config.js";
 import { providers } from "ethers";
 
 export async function createClobClient(): Promise<ClobClient> {
-    const provider = new providers.JsonRpcProvider(CONFIG.RPC_URL);
+    // Use FallbackProvider for multiple RPCs
+    const providersList = CONFIG.RPC_URLS.map(url => new providers.JsonRpcProvider(url));
+    const provider = new providers.FallbackProvider(providersList, 1); // Quorum 1
+
     const signer = new Wallet(CONFIG.PRIVATE_KEY, provider);
     const chainId = CONFIG.CHAIN_ID || 137;
 

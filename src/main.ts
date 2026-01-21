@@ -107,11 +107,8 @@ async function main() {
     // I will include the previous logic here.
 
     // 1. Env Check
-    const rpcUrl = process.env.RPC_URL;
-    const privateKey = process.env.PRIVATE_KEY;
-    if (!rpcUrl || !privateKey) {
-        throw new Error("Missing RPC_URL or PRIVATE_KEY in .env");
-    }
+    // 1. Env Check handled by config module import
+
 
     // Await user confirmation if not verbose? No, just run.
     console.log("Starting Bot...");
