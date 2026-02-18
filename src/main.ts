@@ -3,9 +3,12 @@ import { createClobClient } from "./clients/clob.js";
 import { createRelayClient } from "./clients/relay.js";
 import { parseCliArgs } from "./config/args.js";
 import { DipArbStrategy, DipArbConfig } from "./strategies/dipArb.js";
+import { Btc5mStrategy } from "./strategies/Btc5mStrategy.js";
 import { TruePairArbStrategy } from "./strategies/TruePairArbStrategy.js";
 import { Bot, BotConfig } from "./bot.js";
 import { PnlManager } from "./lib/pnlManager.js"; // Import PnlManager
+import { SimpleHedgeStrategy } from "./strategies/SimpleHedgeStrategy.js";
+import { redeemPositions } from "./scripts/redeem.js";
 
 // --- UI Helpers for Dashboard ---
 const COLORS = {
@@ -133,6 +136,10 @@ async function main() {
             maxRiskPct: 0.05, // Default safe configs or map from args if needed
             // Map relevant args or rely on strategy defaults
         });
+    } else if (args.strategy === 'btc5m') {
+        strategy = new Btc5mStrategy(args);
+    } else if (args.strategy === 'simple-hedge') {
+        strategy = new SimpleHedgeStrategy(args);
     } else {
         strategy = new DipArbStrategy(args);
     }
@@ -145,11 +152,8 @@ async function main() {
 
     // Handle --redeem special mode
     if (args.redeem) {
-        console.log("REDEEM MODE: Checking for redeemable positions...");
-        // This would call strategy.redeem() if implemented, 
-        // or we could just use a redeem utility. 
-        // For now, let's just warn it's not fully implemented in Strategy yet or simple check.
-        // But the previous file handled it by passing args to strategy.
+        await redeemPositions();
+        return;
     }
 
     const bot = new Bot(clobClient, relayClient, strategy, config);

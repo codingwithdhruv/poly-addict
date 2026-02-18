@@ -176,12 +176,15 @@ export function parseCliArgs(): DipArbConfig {
         // windowMinutes removed
         ignorePriceBelow: getArgValue('min-price', defaults.ignorePriceBelow!), // exposed as --min-price
         minExpectedProfit: getArgValue('min-profit', defaults.minExpectedProfit!),
+        tradeSizeUsd: getArgValue('size', 20) || getArgValue('amount', 20),
         verbose: getBoolArg('verbose', false),
         info: args.includes('-info') || args.includes('--info'),
         redeem: args.includes('-redeem') || args.includes('--redeem'),
         dashboard: args.includes('-dashboard') || args.includes('--dashboard'),
         // Strategy Selection
-        strategy: (args.includes('--arb') || args.includes('-arb')) ? 'true-arb' : 'dip' as any,
+        strategy: (args.includes('--arb') || args.includes('-arb')) ? 'true-arb' :
+            (args.includes('--btc5m') || args.find(a => a.startsWith('--strategy=btc5m'))) ? 'btc5m' :
+                (args.includes('--simple-hedge') || args.find(a => a.startsWith('--strategy=simple-hedge'))) ? 'simple-hedge' : 'dip' as any,
         makerBias: defaults.makerBias
     };
 }

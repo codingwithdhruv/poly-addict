@@ -3,6 +3,7 @@ import { ClobClient, Side, AssetType } from "@polymarket/clob-client";
 import { RelayClient } from "@polymarket/builder-relayer-client";
 import { GammaClient } from "../clients/gamma-api.js";
 import { PriceSocket, PriceUpdate } from "../clients/websocket.js";
+import { DipArbConfig, LateExitConfig, PartialUnwindConfig, EarlyExitConfig, MakerBiasConfig } from "./dipArb.js";
 import { PnlManager, CoinPnL } from "../lib/pnlManager.js";
 import { WalletGuard } from "../lib/walletGuard.js";
 import { redeemPositions } from "../scripts/redeem.js";
@@ -101,59 +102,10 @@ interface MarketState {
     arbLocked?: boolean;
 }
 
-export interface LateExitConfig {
-    enabled: boolean;
-    timeRemainingSeconds: number; // e.g. 60
-    minWinnerPrice: number;       // e.g. 0.70
-    minProfitUsd: number;         // e.g. 0.00 (just be positive)
-}
+// Config interfaces imported from ./dipArb.js
 
-export interface PartialUnwindConfig {
-    enabled: boolean;
-    timeRemainingSeconds: number; // e.g. 45
-    minWinnerPrice: number;       // e.g. 0.70
-    minProfitUsd: number;         // e.g. 0.20
-}
-
-export interface EarlyExitConfig {
-    enabled: boolean;
-    minProfitPct: number;   // e.g. 0.15 = +15%
-    minProfitUsd: number;   // e.g. $1
-    maxSlippagePct: number; // e.g. 0.03
-}
-
-export interface MakerBiasConfig {
-    enabled: boolean;
-    minPrice: number;       // e.g. 0.35 (Maker Zone Start)
-    maxPrice: number;       // e.g. 0.65 (Maker Zone End)
-    passiveFirst: boolean;  // Try limit order first?
-    fallbackMs: number;     // If not filled, take aggressiveness after X ms
-}
-
-export interface DipArbConfig {
-    coin: string;
-    dipThreshold: number;      // movePct
-    slidingWindowMs: number;
-    sumTarget: number;
-    shares: number;
-    leg2TimeoutSeconds: number;
-    ignorePriceBelow?: number;
-    verbose?: boolean;
-    info?: boolean;
-    redeem?: boolean;
-    dashboard?: boolean;
-    strategy?: 'dip' | 'true-arb' | 'btc5m' | 'simple-hedge';
-    minExpectedProfit?: number; // [FIX] Minimum Edge Gate
-    makerBias?: MakerBiasConfig; // [NEW] Maker Rebate Logic
-    earlyExit?: EarlyExitConfig;
-    lateExit?: LateExitConfig;
-    partialUnwind?: PartialUnwindConfig;
-    tradeSizeUsd?: number; // [NEW] Per-side USD size for Simple Hedge
-    // windowMinutes removed
-}
-
-export class DipArbStrategy implements Strategy {
-    name = "DipArbitrage (Gabagool)";
+export class Btc5mStrategy implements Strategy {
+    name = "BTC 5m Strategy";
     private clobClient?: ClobClient;
     private gammaClient: GammaClient;
     private priceSocket: PriceSocket;
@@ -272,7 +224,7 @@ export class DipArbStrategy implements Strategy {
 
                     try {
                         // 1. Try scanning upcoming (fast, standard)
-                        let markets = await this.scanUpcomingMarkets(this.config.coin, '15m');
+                        let markets = await this.scanUpcomingMarkets(this.config.coin, '5m');
                         let targetMarket = markets.find(m => m.slug === c.id || m.questionID === c.id);
 
                         // 2. If not found, try DIRECT fetch (handles active-but-started or slightly expired)
@@ -408,10 +360,10 @@ export class DipArbStrategy implements Strategy {
         let markets: any[] = [];
         let attempts = 0;
 
-        console.log(`[${this.name}] Scanning for ${this.config.coin} 15m markets...`);
+        console.log(`[${this.name}] Scanning for ${this.config.coin} 5m markets...`);
 
         while (markets.length === 0) {
-            markets = await this.scanUpcomingMarkets(this.config.coin, '15m');
+            markets = await this.scanUpcomingMarkets(this.config.coin, '5m');
             markets = markets.filter(m => {
                 const endTime = new Date(m.events?.[0]?.endDate || m.endDateIso).getTime();
                 return endTime > Date.now();
@@ -445,7 +397,7 @@ export class DipArbStrategy implements Strategy {
         const endTime = new Date(endTimeStr).getTime();
 
         const slugParts = targetMarket.slug.split('-');
-        let startTime = endTime - 15 * 60 * 1000;
+        let startTime = endTime - 5 * 60 * 1000;
         const timestampInSlug = parseInt(slugParts[slugParts.length - 1]);
         if (!isNaN(timestampInSlug)) {
             startTime = timestampInSlug * 1000;
