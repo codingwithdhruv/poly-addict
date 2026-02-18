@@ -5,6 +5,25 @@ import { RelayClient } from "@polymarket/builder-relayer-client";
 import { GammaClient } from "../clients/gamma-api.js";
 import { PriceSocket } from "../clients/websocket.js";
 import { DipArbConfig } from "./dipArb.js";
+import { redeemPositions } from "../scripts/redeem.js";
+
+// --- UI / ANSI Helpers ---
+const COLORS = {
+    RESET: "\x1b[0m",
+    BRIGHT: "\x1b[1m",
+    DIM: "\x1b[2m",
+    RED: "\x1b[31m",
+    GREEN: "\x1b[32m",
+    YELLOW: "\x1b[33m",
+    BLUE: "\x1b[34m",
+    MAGENTA: "\x1b[35m",
+    CYAN: "\x1b[36m",
+    WHITE: "\x1b[37m",
+};
+
+function color(text: string, colorCode: string): string {
+    return `${colorCode}${text}${COLORS.RESET}`;
+}
 
 interface MarketState {
     marketId: string;
@@ -17,6 +36,7 @@ interface MarketState {
     noFilled: boolean;
     ordersPlaced: boolean;
     startTime: number;
+    prices: Map<string, number>; // Latest price per token
 }
 
 export class SimpleHedgeStrategy implements Strategy {
@@ -28,9 +48,9 @@ export class SimpleHedgeStrategy implements Strategy {
     private priceSocket?: PriceSocket;
 
     // Configuration
-    private readonly MAX_CONCURRENT = 2;
+    private readonly MAX_CONCURRENT = 1; // [FIX] Strict single-market discipline
     private tradeSizeUsd = 20; // Default $20
-    private readonly LIMIT_PRICE = 0.35;
+    private limitPrice = 0.35; // Default 35c
     private readonly COOLDOWN_MS = 15 * 60 * 1000; // 15 mins
     private readonly COIN = "BTC";
 
@@ -52,17 +72,19 @@ export class SimpleHedgeStrategy implements Strategy {
 
     constructor(config?: Partial<DipArbConfig>) {
         this.gammaClient = new GammaClient();
-        // Socket is kept for logging/data collection, but not used for triggers
         this.priceSocket = new PriceSocket(this.onPriceUpdate.bind(this));
 
         if (config?.tradeSizeUsd) {
             this.tradeSizeUsd = config.tradeSizeUsd;
         }
+        if (config?.limitPrice) {
+            this.limitPrice = config.limitPrice;
+        }
     }
 
     async init(clobClient: ClobClient, relayClient: RelayClient): Promise<void> {
         this.clobClient = clobClient;
-        console.log(`[SimpleHedge] Init: ${this.MAX_CONCURRENT} mkts max, $${this.tradeSizeUsd}/side @ ${this.LIMIT_PRICE}`);
+        console.log(`[SimpleHedge] Init: Max ${this.MAX_CONCURRENT} mkt, $${this.tradeSizeUsd}/side @ ${this.limitPrice}c`);
     }
 
     async run(): Promise<void> {
@@ -121,8 +143,6 @@ export class SimpleHedgeStrategy implements Strategy {
         if (state.yesOrderId && !state.yesFilled) {
             try {
                 const order = await this.clobClient.getOrder(state.yesOrderId);
-                // Polymarket API: size_matched or logic based on status
-                // If status is MATCHED or size_matched >= original size
                 // @ts-ignore
                 if (order && (order.status === "MATCHED" || parseFloat(order.size_matched) >= this.calcSize())) {
                     state.yesFilled = true;
@@ -188,6 +208,15 @@ export class SimpleHedgeStrategy implements Strategy {
         console.log(`[SimpleHedge] Result for ${state.slug}: ${outcome}`);
         console.log(`[SimpleHedge] Fills: YES=${state.yesFilled} NO=${state.noFilled} | Res=${resolution}`);
 
+        // 3. AUTO-REDEEM
+        console.log(color("🔄 Auto-Redeeming winnings...", COLORS.CYAN));
+        try {
+            await redeemPositions();
+            console.log(color("✅ Auto-Redeem Complete.", COLORS.GREEN));
+        } catch (e: any) {
+            console.error(color(`❌ Auto-Redeem Failed: ${e.message}`, COLORS.RED));
+        }
+
         // Trigger Cooldown?
         if (this.consecutiveFailures >= 2) {
             console.warn(`[SimpleHedge] ⚠️ 2 Consecutive Directional Failures! Triggering 15m Cooldown.`);
@@ -195,6 +224,7 @@ export class SimpleHedgeStrategy implements Strategy {
         }
     }
 
+    // [FIXED] findAndJoinMarket
     private async findAndJoinMarket() {
         if (this.activeMarkets.size >= this.MAX_CONCURRENT || this.cooldownUntil) return;
 
@@ -203,41 +233,63 @@ export class SimpleHedgeStrategy implements Strategy {
         const interval = 300;
         const currentSlot = Math.floor(nowSec / interval) * interval;
 
-        const slotsToCheck = 3;
-        for (let i = 0; i < slotsToCheck; i++) {
+        // Check slots 0 (current), 1 (next), 2 (future)
+        // STRICT RULE: Only join ONE valid market.
+        for (let i = 0; i < 3; i++) {
             const startTimestamp = currentSlot + (i * interval);
-            const slug = `${this.COIN.toLowerCase()}-updown-5m-${startTimestamp}`;
+            const expectedSlug = `${this.COIN.toLowerCase()}-updown-5m-${startTimestamp}`;
 
             // Uniqueness check
             let alreadyActive = false;
             for (const m of this.activeMarkets.values()) {
-                if (m.slug === slug) alreadyActive = true;
+                if (m.slug === expectedSlug) alreadyActive = true;
             }
             if (alreadyActive) continue;
 
             // Fetch
             try {
-                const markets = await this.gammaClient.getMarkets(`slug=${slug}`);
+                const markets = await this.gammaClient.getMarkets(`slug=${expectedSlug}`);
                 if (markets && markets.length > 0) {
                     const m = markets[0];
                     if (m.closed) continue;
 
-                    // Check time remaining
-                    const parts = m.slug.split('-');
-                    const slugTs = parseInt(parts[parts.length - 1]);
+                    // [FIX] Strict Slug Match (Avoid fuzzy 15m matches)
+                    if (m.slug !== expectedSlug) {
+                        // console.log(`[SimpleHedge] Skip mismatch: ${m.slug} != ${expectedSlug}`);
+                        continue;
+                    }
+
+                    // [FIX] Valid End Time Calculation (Trust Slug > API)
+                    const slugParts = m.slug.split('-');
+                    const slugTs = parseInt(slugParts[slugParts.length - 1]);
+                    const startTime = slugTs * 1000;
                     const endTime = (slugTs + interval) * 1000;
 
-                    if (Date.now() >= endTime - 30000) continue; // Skip if < 30s left
+                    const now = Date.now();
+                    const timeLeftMs = endTime - now;
+
+                    // [CONSTRAINT] If < 4m 30s remaining, skip this cycle (wait for next)
+                    if (timeLeftMs < 270000) { // 4m 30s = 270s
+                        // Only log if it's kinda close (e.g. > 30s left), and we haven't found a better candidate
+                        if (timeLeftMs > 30000 && i === 0) {
+                            console.log(`[SimpleHedge] Skipping ${m.slug} (${(timeLeftMs / 1000).toFixed(0)}s left). Too late to join (< 270s).`);
+                        }
+                        continue; // Check next slot
+                    }
+
+                    if (now >= endTime - 30000) continue; // Skip if basically ended
 
                     // JOIN
-                    await this.joinMarket(m, endTime);
-                    if (this.activeMarkets.size >= this.MAX_CONCURRENT) break;
+                    await this.joinMarket(m, startTime, endTime);
+
+                    // [FIX] CRITICAL: Stop searching after finding ONE valid market.
+                    break;
                 }
             } catch (e) { }
         }
     }
 
-    private async joinMarket(market: any, endTime: number) {
+    private async joinMarket(market: any, startTime: number, endTime: number) {
         console.log(`[SimpleHedge] Joining Market: ${market.slug}`);
 
         let tokenIds: string[] = [];
@@ -256,10 +308,34 @@ export class SimpleHedgeStrategy implements Strategy {
             yesFilled: false,
             noFilled: false,
             ordersPlaced: false,
-            startTime: Date.now()
+            startTime,
+            prices: new Map()
         };
 
+        // [FIX] Seed Initial Prices from CLOB to ensure accuracy
+        if (this.clobClient) {
+            try {
+                // Fetch midpoints for both tokens in parallel
+                const [mid1, mid2] = await Promise.all([
+                    this.clobClient.getMidpoint(tokenIds[0]),
+                    this.clobClient.getMidpoint(tokenIds[1])
+                ]);
+
+                if (mid1 && mid1.mid) state.prices.set(tokenIds[0], parseFloat(mid1.mid));
+                if (mid2 && mid2.mid) state.prices.set(tokenIds[1], parseFloat(mid2.mid));
+
+                console.log(`[SimpleHedge] Seeded Prices: ${mid1?.mid || '?'} / ${mid2?.mid || '?'}`);
+            } catch (e) {
+                console.warn(`[SimpleHedge] Failed to fetch initial midpoints: ${e}`);
+            }
+        }
+
         this.activeMarkets.set(market.id, state);
+
+        // Subscribe to prices
+        if (this.priceSocket) {
+            this.priceSocket.connect(tokenIds);
+        }
 
         // PLACE ORDERS IMMEDIATELY
         await this.placeDualOrders(state);
@@ -267,21 +343,20 @@ export class SimpleHedgeStrategy implements Strategy {
 
     private calcSize(): number {
         // Size = USD / Price
-        // $20 / 0.35 ~= 57 shares
-        return Math.floor(this.tradeSizeUsd / this.LIMIT_PRICE);
+        return Math.floor(this.tradeSizeUsd / this.limitPrice);
     }
 
     private async placeDualOrders(state: MarketState) {
         if (!this.clobClient) return;
 
         const size = this.calcSize();
-        console.log(`[SimpleHedge] Posting Liquidity: Buy YES/NO @ ${this.LIMIT_PRICE} (Size: ${size}) for ${state.slug}`);
+        console.log(`[SimpleHedge] Posting Liquidity: Buy YES/NO @ ${this.limitPrice} (Size: ${size}) for ${state.slug}`);
 
         // YES Order
         try {
             const yesOrder = await this.clobClient.createAndPostOrder({
                 tokenID: state.tokenIds[0],
-                price: this.LIMIT_PRICE,
+                price: this.limitPrice,
                 side: Side.BUY,
                 size: size
             });
@@ -296,7 +371,7 @@ export class SimpleHedgeStrategy implements Strategy {
         try {
             const noOrder = await this.clobClient.createAndPostOrder({
                 tokenID: state.tokenIds[1],
-                price: this.LIMIT_PRICE,
+                price: this.limitPrice,
                 side: Side.BUY,
                 size: size
             });
@@ -318,23 +393,66 @@ export class SimpleHedgeStrategy implements Strategy {
         } catch (e) { /* ignore already cancelled/filled */ }
     }
 
-    // Passive Listener (just for logging)
+    // Passive Listener
     public onPriceUpdate(update: any) {
-        // Removed LiveDataManager usage
-        // Just log heavily if needed or no-op
+        const tokenId = update.asset_id;
+        const currentPrice = parseFloat(update.price);
+
+        // Update active markets
+        for (const state of this.activeMarkets.values()) {
+            if (state.tokenIds.includes(tokenId)) {
+                state.prices.set(tokenId, currentPrice);
+                break;
+            }
+        }
     }
 
     private logStatus() {
-        const active = Array.from(this.activeMarkets.values()).map(m => {
-            const timeLeft = Math.max(0, (m.endTime - Date.now()) / 1000).toFixed(0);
-            return `${m.slug} (${timeLeft}s) [Y:${m.yesFilled ? '✅' : '⏳'} N:${m.noFilled ? '✅' : '⏳'}]`;
-        });
-        console.log(`[SimpleHedge] Active: ${active.length}/${this.MAX_CONCURRENT} | ${active.join(', ')} | FailStreak: ${this.consecutiveFailures}`);
+        if (this.activeMarkets.size === 0) {
+            if (this.consecutiveFailures > 0) {
+                console.log(`[SimpleHedge] Idle. FailStreak: ${this.consecutiveFailures}`);
+            }
+            return;
+        }
+
+        for (const state of this.activeMarkets.values()) {
+            const now = Date.now();
+
+            // Format time display
+            let timeStr = "";
+            let statusIcon = "";
+            let timerColor = COLORS.WHITE;
+
+            if (now < state.startTime) {
+                const startsIn = Math.ceil((state.startTime - now) / 1000);
+                timeStr = `Starts: ${Math.floor(startsIn / 60)}m ${startsIn % 60}s`;
+                statusIcon = "⏳";
+                timerColor = COLORS.YELLOW;
+            } else {
+                const endsIn = Math.max(0, Math.ceil((state.endTime - now) / 1000));
+                timeStr = `Ends: ${Math.floor(endsIn / 60)}m ${endsIn % 60}s`;
+                statusIcon = "🟢";
+                timerColor = COLORS.GREEN;
+            }
+
+            const p1 = state.prices.get(state.tokenIds[0])?.toFixed(2) || "?.??";
+            const p2 = state.prices.get(state.tokenIds[1])?.toFixed(2) || "?.??";
+
+            const posStr = `[Y:${state.yesFilled ? '✅' : '⏳'} N:${state.noFilled ? '✅' : '⏳'}]`;
+
+            console.log(
+                `${color("[STATUS]", COLORS.CYAN)} ` +
+                `${color(timeStr.padEnd(14), timerColor)} | ` +
+                `Px: ${color(p1, COLORS.GREEN)}/${color(p2, COLORS.RED)} | ` +
+                `${posStr} ${statusIcon} ${state.slug}`
+            );
+        }
     }
 
     async cleanup(): Promise<void> {
         this.destroyed = true;
         if (this.loopInterval) clearInterval(this.loopInterval);
+        if (this.priceSocket) this.priceSocket.close();
         console.log(`[SimpleHedge] Cleanup: Cancelling all active orders...`);
         for (const state of this.activeMarkets.values()) {
             await this.handleMarketExpiry(state);

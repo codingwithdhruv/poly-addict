@@ -15,6 +15,8 @@ interface CliArgs {
     redeem: boolean;
     dashboard: boolean;
     minExpectedProfit?: number;
+    tradeSizeUsd?: number; // [NEW] Per-side USD size for Simple Hedge
+    limitPrice?: number;   // [NEW] Fixed price for Simple Hedge
 }
 
 function isWeekendLowVolIST(): boolean {
@@ -177,6 +179,7 @@ export function parseCliArgs(): DipArbConfig {
         ignorePriceBelow: getArgValue('min-price', defaults.ignorePriceBelow!), // exposed as --min-price
         minExpectedProfit: getArgValue('min-profit', defaults.minExpectedProfit!),
         tradeSizeUsd: getArgValue('size', 20) || getArgValue('amount', 20),
+        limitPrice: getArgValue('price', 0.35), // [NEW] SimpleHedge limit price
         verbose: getBoolArg('verbose', false),
         info: args.includes('-info') || args.includes('--info'),
         redeem: args.includes('-redeem') || args.includes('--redeem'),
@@ -184,7 +187,7 @@ export function parseCliArgs(): DipArbConfig {
         // Strategy Selection
         strategy: (args.includes('--arb') || args.includes('-arb')) ? 'true-arb' :
             (args.includes('--btc5m') || args.find(a => a.startsWith('--strategy=btc5m'))) ? 'btc5m' :
-                (args.includes('--simple-hedge') || args.find(a => a.startsWith('--strategy=simple-hedge'))) ? 'simple-hedge' : 'dip' as any,
+                (args.includes('--simple-hedge') || args.find(a => a.startsWith('--strategy=simple-hedge'))) ? 'simple-hedge' : 'dip',
         makerBias: defaults.makerBias
     };
 }
