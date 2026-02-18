@@ -149,7 +149,8 @@ export interface DipArbConfig {
     lateExit?: LateExitConfig;
     partialUnwind?: PartialUnwindConfig;
     tradeSizeUsd?: number; // [NEW] Per-side USD size for Simple Hedge
-    limitPrice?: number;   // [NEW] Fixed price for Simple Hedge
+    limitPrice?: number | string;   // [NEW] Fixed price or Range "0.33-0.35" for Simple Hedge
+    cooldownMinutes?: number; // [NEW] Dynamic cooldown
     // windowMinutes removed
 }
 

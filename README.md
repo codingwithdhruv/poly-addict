@@ -5,6 +5,79 @@
 
 ---
 
+## ⚡️ Quick Copy-Paste Commands
+
+### 🟢 1. Simple Hedge (Passive Market Making)
+*Best for: Passive income on 5m volatility. Places dual limit orders to capture spread.*
+
+```bash
+# Default (35c fixed price, $20 size, 10m cooldown)
+./trade btc --simple-hedge
+
+# Randomized Price Range (e.g. 0.33-0.35)
+./trade btc --simple-hedge --price=0.33-0.35
+
+# Custom Setup (Larger size, Longer cooldown)
+./trade btc --simple-hedge --size=50 --cooldown=15
+```
+
+### 🔴 2. The Gabagool (Dip Buying)
+*Best for: Catching panic dumps. Buys when price crashes X% in Y seconds.*
+
+```bash
+# Aggressive BTC Dip Buying (15% drop, 50 shares)
+./trade btc --dip=0.15 --shares=50
+
+# Conservative ETH Dip Buying (25% drop)
+./trade eth --dip=0.25
+```
+
+### 🔵 3. BTC 5m Scalper
+*Best for: High-velocity scalping on 5-minute markets.*
+
+```bash
+# Run 5m Scalper
+./trade btc --strategy=btc5m
+```
+
+---
+
+## 🔧 Configuration Flags
+
+### 🤖 Strategy: Simple Hedge
+*Usage: `./trade <COIN> --simple-hedge [FLAGS]`*
+
+| Flag | Description | Default | Example |
+| :--- | :--- | :--- | :--- |
+| `--price` | Fixed price OR Range | `0.35` | `--price=0.33-0.35` |
+| `--size` | Trade size in USD per side | `20` | `--size=100` |
+| `--cooldown` | Pause duration (mins) after failure | `10` | `--cooldown=5` |
+
+### 📉 Strategy: Dip Arbitrage (Gabagool)
+*Usage: `./trade <COIN> [FLAGS]` (Default Strategy)*
+
+| Flag | Description | Default |
+| :--- | :--- | :--- |
+| `--dip` | Price drop % to trigger buy (0.25 = 25%) | *Var* |
+| `--target` | Sum Target to exit (AvgYes + AvgNo) | `0.96` |
+| `--shares` | Max shares per clip | *Var* |
+| `--timeout` | Max wait (sec) before Force Hedge | *Var* |
+| `--min-profit` | Min Expected Profit per trade ($) | *Var* |
+| `--min-price` | Minimum price to trade (avoid dust) | `0.06` |
+
+### 🌍 System Flags
+*Applies to all strategies.*
+
+| Flag | Description | Default |
+| :--- | :--- | :--- |
+| `--coin=<COIN>` | Target Asset (BTC, ETH, SOL, XRP) | `ETH` |
+| `--redeem` | Redeem all winning positions and exit | `false` |
+| `--dashboard` | Launch standalone PnL Dashboard | `false` |
+| `--info` | Show wallet balances and exit | `false` |
+| `--verbose` | Enable debug logs | `false` |
+
+---
+
 ## 🚀 Features
 
 ### 🧠 Strategic Engines
@@ -13,92 +86,20 @@
     *   **Best For**: High-volatility events (Election nights, Sporting upsets).
 
 2.  **Simple Hedge (Neutral Market Making)**
-    *   **Logic**: Places dormant limit orders (default **$0.35**) on both sides (Yes/No) to capture spread and volatility.
-    *   **Behavior**: Joins 5-minute markets, places dual orders, and waits for fills. If only one side fills, it manages directional risk.
-    *   **Smart**: Auto-skips stale markets (< 4m30s remaining) and auto-redeems winnings.
+    *   **Logic**: Places dormant limit orders on both sides (Yes/No) to capture spread and volatility.
+    *   **Behavior**: Joins 5-minute markets, places dual orders.
+    *   **Smart Features**:
+        *   **Randomized Pricing**: Avoids predictability by varying limit prices.
+        *   **Auto-Redeem**: Claims winnings immediately after market expiry.
+        *   **Strict Cooldown**: Pauses trading if hedge fails (partial fills) to protect capital.
 
 3.  **BTC 5m Scalper**
-    *   **Logic**: Specialized high-velocity strategy for 5-minute BTC markets.
-    *   **Optimized**: Faster scan rates and tighter timing logic for rapid-fire markets.
-
-4.  **True Pair Arb (Atomic)**
-    *   **Logic**: Scans for instant risk-free arbitrage opportunities where `AskYes + AskNo < 1.00`.
+    *   **Logic**: Specialized high-velocity strategy for 5-minute BTC markets with tighter timing.
 
 ### 🛡️ Safety Systems
 *   **WalletGuard™**: Prevents capital over-commitment by tracking in-flight orders.
 *   **Force Hedge**: Automatically neutralizes delta if a leg fails to fill.
 *   **Proxy Support**: Native integration for Gnosis Safe / Relayer execution (Gasless).
-
----
-
-## ⚡️ Quick Copy-Paste Commands
-
-### 🟢 1. Market Making (Simple Hedge)
-*Best for passive income on 5m volatility.*
-```bash
-# Default (35c limit, $20 size)
-./trade btc --simple-hedge
-
-# Custom (38c limit, $50 size)
-./trade btc --simple-hedge --price=0.38 --size=50
-```
-
-### 🔴 2. Dip Buying (Gabagool)
-*Best for catching dumps.*
-```bash
-# Aggressive BTC Dip Buying
-./trade btc --dip=0.15 --shares=50
-```
-
-### 🔵 3. BTC 5m Scalper
-*High freq scalping.*
-```bash
-./trade btc --strategy=btc5m
-```
-
----
-
-## 🔧 Configuration Flags
-
-### 🌍 Global / System Flags
-*Applies to all strategies.*
-
-| Flag | Description | Default |
-| :--- | :--- | :--- |
-| `--coin=<COIN>` | Target Asset (BTC, ETH, SOL, XRP) | ETH |
-| `--redeem` | Redeem all winning positions and exit | false |
-| `--dashboard` | Launch standalone PnL Dashboard | false |
-| `--info` | Show wallet balances and exit | false |
-| `--verbose` | Enable debug logs | false |
-
-### 🤖 Simple Hedge Flags
-*Usage: `./trade <COIN> --simple-hedge [FLAGS]`*
-
-| Flag | Description | Default |
-| :--- | :--- | :--- |
-| `--simple-hedge` | **Activates Simple Hedge Strategy** | - |
-| `--price=<0.XX>` | Limit price for both sides (e.g. 0.35 = 35c) | 0.35 |
-| `--size=<$>` | Trade size in USD per side | 20 |
-
-### 📉 Dip Arbitrage (Gabagool) Flags
-*Usage: `./trade <COIN> [FLAGS]` (Default Strategy)*
-
-| Flag | Description | Default |
-| :--- | :--- | :--- |
-| `--dip=<0.XX>` | Price drop % to trigger buy (0.25 = 25%) | *Var* |
-| `--target=<0.XX>` | Sum Target to exit (AvgYes + AvgNo) | 0.96 |
-| `--shares=<N>` | Max shares per clip | *Var* |
-| `--timeout=<SEC>` | Max wait before Force Hedge | *Var* |
-| `--min-profit=<$>` | Min Expected Profit per trade | *Var* |
-| `--min-price=<0.XX>` | Minimum price to trade (avoid dust) | 0.06 |
-
-### ⚡ BTC 5m Scalper Flags
-*Usage: `./trade btc --strategy=btc5m`*
-
-| Flag | Description | Default |
-| :--- | :--- | :--- |
-| `--strategy=btc5m` | **Activates BTC 5m Scalper** | - |
-| `--early-exit` | Enable early exit logic (if huge profit) | true |
 
 ---
 

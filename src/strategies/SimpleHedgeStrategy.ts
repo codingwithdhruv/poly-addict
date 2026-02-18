@@ -50,8 +50,10 @@ export class SimpleHedgeStrategy implements Strategy {
     // Configuration
     private readonly MAX_CONCURRENT = 1; // [FIX] Strict single-market discipline
     private tradeSizeUsd = 20; // Default $20
-    private limitPrice = 0.35; // Default 35c
-    private readonly COOLDOWN_MS = 15 * 60 * 1000; // 15 mins
+    private minPrice = 0.35;
+    private maxPrice = 0.35;
+    private currentRoundPrice = 0.35; // Selected price for the "current" market
+    private COOLDOWN_MS = 10 * 60 * 1000; // Default 10 mins
     private readonly COIN = "BTC";
 
     // State
@@ -78,13 +80,25 @@ export class SimpleHedgeStrategy implements Strategy {
             this.tradeSizeUsd = config.tradeSizeUsd;
         }
         if (config?.limitPrice) {
-            this.limitPrice = config.limitPrice;
+            if (typeof config.limitPrice === 'number') {
+                this.minPrice = config.limitPrice;
+                this.maxPrice = config.limitPrice;
+            } else if (typeof config.limitPrice === 'string') {
+                const parts = config.limitPrice.split('-');
+                if (parts.length === 2) {
+                    this.minPrice = parseFloat(parts[0]);
+                    this.maxPrice = parseFloat(parts[1]);
+                }
+            }
+        }
+        if (config?.cooldownMinutes) {
+            this.COOLDOWN_MS = config.cooldownMinutes * 60 * 1000;
         }
     }
 
     async init(clobClient: ClobClient, relayClient: RelayClient): Promise<void> {
         this.clobClient = clobClient;
-        console.log(`[SimpleHedge] Init: Max ${this.MAX_CONCURRENT} mkt, $${this.tradeSizeUsd}/side @ ${this.limitPrice}c`);
+        console.log(`[SimpleHedge] Init: Max ${this.MAX_CONCURRENT} mkt, $${this.tradeSizeUsd}/side @ ${this.minPrice}-${this.maxPrice}c (Cooldown: ${this.COOLDOWN_MS / 60000}m)`);
     }
 
     async run(): Promise<void> {
@@ -197,9 +211,15 @@ export class SimpleHedgeStrategy implements Strategy {
                 this.consecutiveFailures++;
             } else if (resolution === "UNKNOWN") {
                 outcome = "EXPOSED_UNCERTAIN";
+                this.consecutiveFailures++; // Treat uncertainty as a failure to hedge
             } else {
-                outcome = "DIRECTIONAL_WIN"; // Got lucky
-                this.consecutiveFailures = 0;
+                outcome = "DIRECTIONAL_WIN";
+                // [FIX] Even if we won, the HEDGE failed (only 1 side filled). 
+                // User wants 15m timeout if "hedge fails" consecutive.
+                // So strictly increment failures here too?
+                // "if 2 consecutive markets only any one side gets filled and hedge fails"
+                // Winning directionally is still a hedge failure.
+                this.consecutiveFailures++;
             }
         } else {
             this.stats.neutral++;
@@ -219,7 +239,7 @@ export class SimpleHedgeStrategy implements Strategy {
 
         // Trigger Cooldown?
         if (this.consecutiveFailures >= 2) {
-            console.warn(`[SimpleHedge] ⚠️ 2 Consecutive Directional Failures! Triggering 15m Cooldown.`);
+            console.warn(`[SimpleHedge] ⚠️ ${this.consecutiveFailures} Consecutive Hedge Failures (Partial Fills). Triggering ${(this.COOLDOWN_MS / 60000).toFixed(1)}m Cooldown.`);
             this.cooldownUntil = Date.now() + this.COOLDOWN_MS;
         }
     }
@@ -337,26 +357,32 @@ export class SimpleHedgeStrategy implements Strategy {
             this.priceSocket.connect(tokenIds);
         }
 
+        // Generate Random Price for this round
+        this.currentRoundPrice = this.minPrice + Math.random() * (this.maxPrice - this.minPrice);
+        // Round to 1 tick (0.01)? Or allow decimals? Gamma allows specific, CLOB might reject.
+        // Assuming 2 decimals for Polymarket (cents).
+        this.currentRoundPrice = Math.floor(this.currentRoundPrice * 100) / 100;
+
         // PLACE ORDERS IMMEDIATELY
         await this.placeDualOrders(state);
     }
 
     private calcSize(): number {
         // Size = USD / Price
-        return Math.floor(this.tradeSizeUsd / this.limitPrice);
+        return Math.floor(this.tradeSizeUsd / this.currentRoundPrice);
     }
 
     private async placeDualOrders(state: MarketState) {
         if (!this.clobClient) return;
 
         const size = this.calcSize();
-        console.log(`[SimpleHedge] Posting Liquidity: Buy YES/NO @ ${this.limitPrice} (Size: ${size}) for ${state.slug}`);
+        console.log(`[SimpleHedge] Posting Liquidity: Buy YES/NO @ ${this.currentRoundPrice.toFixed(2)} (Size: ${size}) for ${state.slug}`);
 
         // YES Order
         try {
             const yesOrder = await this.clobClient.createAndPostOrder({
                 tokenID: state.tokenIds[0],
-                price: this.limitPrice,
+                price: this.currentRoundPrice,
                 side: Side.BUY,
                 size: size
             });
@@ -371,7 +397,7 @@ export class SimpleHedgeStrategy implements Strategy {
         try {
             const noOrder = await this.clobClient.createAndPostOrder({
                 tokenID: state.tokenIds[1],
-                price: this.limitPrice,
+                price: this.currentRoundPrice,
                 side: Side.BUY,
                 size: size
             });

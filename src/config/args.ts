@@ -16,7 +16,8 @@ interface CliArgs {
     dashboard: boolean;
     minExpectedProfit?: number;
     tradeSizeUsd?: number; // [NEW] Per-side USD size for Simple Hedge
-    limitPrice?: number;   // [NEW] Fixed price for Simple Hedge
+    limitPrice?: number | string;   // [NEW] Fixed price for Simple Hedge
+    cooldownMinutes?: number; // [NEW] Dynamic cooldown for Simple Hedge
 }
 
 function isWeekendLowVolIST(): boolean {
@@ -179,7 +180,15 @@ export function parseCliArgs(): DipArbConfig {
         ignorePriceBelow: getArgValue('min-price', defaults.ignorePriceBelow!), // exposed as --min-price
         minExpectedProfit: getArgValue('min-profit', defaults.minExpectedProfit!),
         tradeSizeUsd: getArgValue('size', 20) || getArgValue('amount', 20),
-        limitPrice: getArgValue('price', 0.35), // [NEW] SimpleHedge limit price
+        limitPrice: (() => {
+            const p = args.find(a => a.startsWith('--price='));
+            if (p) {
+                const val = p.split('=')[1];
+                return val.includes('-') ? val : parseFloat(val);
+            }
+            return 0.35;
+        })(),
+        cooldownMinutes: getArgValue('cooldown', 10), // Default 10m
         verbose: getBoolArg('verbose', false),
         info: args.includes('-info') || args.includes('--info'),
         redeem: args.includes('-redeem') || args.includes('--redeem'),
