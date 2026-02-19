@@ -193,12 +193,19 @@ export function parseCliArgs(): DipArbConfig {
         })(),
         cooldownMinutes: getArgValue('cooldown', 10), // Default 10m
         side: (() => {
-            const s = args.find(a => a.startsWith('--side='));
+            const s = args.find(a => a.startsWith('--side'));
+            // Support both --side=YES and --side YES
+            let val = 'BOTH';
             if (s) {
-                const val = s.split('=')[1].toUpperCase();
-                if (['YES', 'NO', 'BOTH'].includes(val)) return val as SideInput;
+                if (s.includes('=')) val = s.split('=')[1];
+                else {
+                    const idx = args.indexOf(s);
+                    if (idx !== -1 && idx < args.length - 1) val = args[idx + 1];
+                }
             }
-            return 'YES'; // Default to YES if not specified
+            val = val.toUpperCase();
+            if (['YES', 'NO', 'BOTH'].includes(val)) return val as SideInput;
+            return 'BOTH';
         })(),
         verbose: getBoolArg('verbose', false),
         info: args.includes('-info') || args.includes('--info'),
@@ -208,7 +215,8 @@ export function parseCliArgs(): DipArbConfig {
         strategy: (args.includes('--arb') || args.includes('-arb')) ? 'true-arb' :
             (args.includes('--btc5m') || args.find(a => a.startsWith('--strategy=btc5m'))) ? 'btc5m' :
                 (args.includes('--simple-hedge') || args.find(a => a.startsWith('--strategy=simple-hedge'))) ? 'simple-hedge' :
-                    (args.includes('--mean-reversion') || args.find(a => a.startsWith('--strategy=mean-reversion'))) ? 'mean-reversion' : 'dip',
+                    (args.includes('--usa-session') || args.includes('--mean-reversion') ||
+                        args.some((a, i) => (a === '--strategy' && (args[i + 1] === 'usa-session' || args[i + 1] === 'mean-reversion')))) ? 'usa-session' : 'dip',
         makerBias: defaults.makerBias
     };
 }

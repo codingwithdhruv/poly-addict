@@ -42,7 +42,7 @@ interface MarketState {
     ordersPlaced: boolean;
 }
 
-export class MeanReversionStrategy implements Strategy {
+export class UsaSessionStrategy implements Strategy {
     name = "Mean Reversion (Extreme Dip/Rip)";
 
     // Clients
@@ -79,7 +79,7 @@ export class MeanReversionStrategy implements Strategy {
 
     async init(clobClient: ClobClient, relayClient: RelayClient): Promise<void> {
         this.clobClient = clobClient;
-        console.log(`[MeanReversion] Init: Target ${this.COIN}, Size $${this.tradeSizeUsd}, Price ${this.limitPrice}c, Side ${this.side}`);
+        console.log(`[UsaSession] Init: Target ${this.COIN}, Size $${this.tradeSizeUsd}, Price ${this.limitPrice}c, Side ${this.side}`);
     }
 
     async run(): Promise<void> {
@@ -98,7 +98,7 @@ export class MeanReversionStrategy implements Strategy {
             try {
                 await this.maintenanceLoop();
             } catch (e) {
-                console.error("[MeanReversion] Loop Error:", e);
+                console.error("[UsaSession] Loop Error:", e);
             } finally {
                 this.isProcessing = false;
             }
@@ -184,7 +184,7 @@ export class MeanReversionStrategy implements Strategy {
     }
 
     private async joinMarket(market: any, startTime: number, endTime: number) {
-        console.log(`[MeanReversion] Joining ${market.slug}`);
+        console.log(`[UsaSession] Joining ${market.slug}`);
 
         let tokenIds: string[] = [];
         try {
@@ -215,7 +215,7 @@ export class MeanReversionStrategy implements Strategy {
         if (!state.ordersPlaced) {
             await this.placeOrders(state);
         } else {
-            console.log(color(`[MeanReversion] ⚠️ Found existing state for ${state.slug}. Skipping new orders.`, COLORS.YELLOW));
+            console.log(color(`[UsaSession] ⚠️ Found existing state for ${state.slug}. Skipping new orders.`, COLORS.YELLOW));
             this.logStatus();
         }
     }
@@ -223,7 +223,7 @@ export class MeanReversionStrategy implements Strategy {
     private async loadStateFromChain(state: MarketState) {
         if (!this.clobClient) return;
 
-        console.log(`[MeanReversion] Checking existing state for ${state.slug}...`);
+        console.log(`[UsaSession] Checking existing state for ${state.slug}...`);
 
         try {
             // 1. Check Open Orders
@@ -242,7 +242,7 @@ export class MeanReversionStrategy implements Strategy {
             if (Array.isArray(orders)) {
                 for (const o of orders) {
                     if (state.tokenIds.includes(o.asset_id)) {
-                        console.log(`[MeanReversion] Found Active Order: ${o.orderID} (${o.side} ${o.size})`);
+                        console.log(`[UsaSession] Found Active Order: ${o.orderID} (${o.side} ${o.size})`);
                         state.ordersPlaced = true;
 
                         // Map to side
@@ -265,7 +265,7 @@ export class MeanReversionStrategy implements Strategy {
             if (Array.isArray(tradeList)) {
                 for (const t of tradeList) {
                     if (state.tokenIds.includes(t.asset_id) && t.side === 'BUY') {
-                        console.log(`[MeanReversion] Found Past Trade: ${t.size} @ ${t.price}`);
+                        console.log(`[UsaSession] Found Past Trade: ${t.size} @ ${t.price}`);
                         state.ordersPlaced = true;
                         // Mark filled
                         if (t.asset_id === state.tokenIds[0]) state.yesFilled = true;
@@ -275,7 +275,7 @@ export class MeanReversionStrategy implements Strategy {
             }
 
         } catch (e) {
-            console.error(`[MeanReversion] Failed to load state:`, e);
+            console.error(`[UsaSession] Failed to load state:`, e);
             // Safety: If we fail to check, do we place orders? 
             // Better to allow duplicate than to do nothing? 
             // User wants strict limit. So maybe FAIL SAFE = Assume placed?
@@ -291,7 +291,7 @@ export class MeanReversionStrategy implements Strategy {
         if (!this.clobClient) return;
 
         const size = this.calcSize();
-        console.log(`[MeanReversion] Placing Orders: Side=${this.side} Price=${this.limitPrice} Size=${size}`);
+        console.log(`[UsaSession] Placing Orders: Side=${this.side} Price=${this.limitPrice} Size=${size}`);
 
         const placeBuy = async (tokenId: string, sideLabel: string) => {
             try {
@@ -303,7 +303,7 @@ export class MeanReversionStrategy implements Strategy {
                 });
                 return order.orderID;
             } catch (e: any) {
-                console.error(`[MeanReversion] Failed to place ${sideLabel}: ${e.message}`);
+                console.error(`[UsaSession] Failed to place ${sideLabel}: ${e.message}`);
                 return undefined;
             }
         };
@@ -330,7 +330,7 @@ export class MeanReversionStrategy implements Strategy {
                 // @ts-ignore
                 if (o && (o.status === "MATCHED" || parseFloat(o.size_matched) > 0)) {
                     state.yesFilled = true;
-                    console.log(color(`[MeanReversion] 🚀 YES FILLED! Waiting for mean reversion...`, COLORS.GREEN));
+                    console.log(color(`[UsaSession] 🚀 YES FILLED! Waiting for mean reversion...`, COLORS.GREEN));
                 }
             } catch (e) { }
         }
@@ -341,14 +341,14 @@ export class MeanReversionStrategy implements Strategy {
                 // @ts-ignore
                 if (o && (o.status === "MATCHED" || parseFloat(o.size_matched) > 0)) {
                     state.noFilled = true;
-                    console.log(color(`[MeanReversion] 🚀 NO FILLED! Waiting for mean reversion...`, COLORS.GREEN));
+                    console.log(color(`[UsaSession] 🚀 NO FILLED! Waiting for mean reversion...`, COLORS.GREEN));
                 }
             } catch (e) { }
         }
     }
 
     private async handleMarketExpiry(state: MarketState) {
-        console.log(`[MeanReversion] Market Expired: ${state.slug}`);
+        console.log(`[UsaSession] Market Expired: ${state.slug}`);
         // Cancel logic if needed? 
         // If not filled, cancel.
         if (state.yesOrderId && !state.yesFilled) await this.cancelOrder(state.yesOrderId);
@@ -379,7 +379,7 @@ export class MeanReversionStrategy implements Strategy {
 
     private logStatus() {
         if (this.activeMarkets.size === 0) {
-            console.log(`[MeanReversion] Scanning...`);
+            console.log(`[UsaSession] Scanning...`);
             return;
         }
 
@@ -391,7 +391,7 @@ export class MeanReversionStrategy implements Strategy {
             const p2 = s.prices.get(s.tokenIds[1])?.toFixed(3) || "?.???";
 
             console.log(
-                color(`[MeanReversion] ${s.slug.split('-').pop()}`, COLORS.CYAN) +
+                color(`[UsaSession] ${s.slug.split('-').pop()}`, COLORS.CYAN) +
                 ` | Time: ${Math.floor(left / 60)}m${left % 60}s` +
                 ` | Px: ${color(p1, COLORS.GREEN)}/${color(p2, COLORS.RED)}` +
                 ` | Fills: Y=${s.yesFilled ? '✅' : '⏳'} N=${s.noFilled ? '✅' : '⏳'}`

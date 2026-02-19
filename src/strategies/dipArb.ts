@@ -142,7 +142,7 @@ export interface DipArbConfig {
     info?: boolean;
     redeem?: boolean;
     dashboard?: boolean;
-    strategy?: 'dip' | 'true-arb' | 'btc5m' | 'simple-hedge' | 'mean-reversion';
+    strategy?: 'dip' | 'true-arb' | 'btc5m' | 'simple-hedge' | 'usa-session';
     minExpectedProfit?: number; // [FIX] Minimum Edge Gate
     makerBias?: MakerBiasConfig; // [NEW] Maker Rebate Logic
     earlyExit?: EarlyExitConfig;
