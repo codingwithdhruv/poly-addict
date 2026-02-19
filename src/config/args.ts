@@ -151,13 +151,24 @@ export function parseCliArgs(): DipArbConfig {
     }
 
     // 3. Helper to parse args
+    // 3. Helper to parse args
     const getArgValue = (name: string, defaultVal: number): number => {
+        const flag = `--${name}`;
+
         // Check --name=VAL
-        const arg = args.find(a => a.startsWith(`--${name}=`));
-        if (arg) {
-            const val = parseFloat(arg.split('=')[1]);
+        const argEq = args.find(a => a.startsWith(`${flag}=`));
+        if (argEq) {
+            const val = parseFloat(argEq.split('=')[1]);
             return isNaN(val) ? defaultVal : val;
         }
+
+        // Check --name VAL
+        const idx = args.indexOf(flag);
+        if (idx !== -1 && idx < args.length - 1) {
+            const val = parseFloat(args[idx + 1]);
+            return isNaN(val) ? defaultVal : val;
+        }
+
         return defaultVal;
     };
 
@@ -168,6 +179,19 @@ export function parseCliArgs(): DipArbConfig {
         if (arg) {
             return arg.split('=')[1].toLowerCase() === 'true';
         }
+        return defaultVal;
+    };
+
+    const getStringArg = (name: string, defaultVal: string): string => {
+        const flag = `--${name}`;
+        // Check --name=VAL
+        const argEq = args.find(a => a.startsWith(`${flag}=`));
+        if (argEq) return argEq.split('=')[1];
+
+        // Check --name VAL
+        const idx = args.indexOf(flag);
+        if (idx !== -1 && idx < args.length - 1) return args[idx + 1];
+
         return defaultVal;
     };
 
@@ -184,26 +208,21 @@ export function parseCliArgs(): DipArbConfig {
         minExpectedProfit: getArgValue('min-profit', defaults.minExpectedProfit!),
         tradeSizeUsd: getArgValue('size', 20) || getArgValue('amount', 20),
         limitPrice: (() => {
-            const p = args.find(a => a.startsWith('--price='));
-            if (p) {
-                const val = p.split('=')[1];
-                return val.includes('-') ? val : parseFloat(val);
+            // Check for explicit --price flag
+            let val = getArgValue('price', -1);
+            if (val === -1) return 0.35; // Default
+
+            // If user provides "1" (meaning 1c) or "50" (meaning 50c), 
+            // handle converting to decimal if > 1 (Since price cannot be > 1.0)
+            if (val >= 1) {
+                console.log(`[Args] Interpreting price ${val} as cents -> ${val / 100}`);
+                return val / 100;
             }
-            return 0.35;
+            return val;
         })(),
         cooldownMinutes: getArgValue('cooldown', 10), // Default 10m
         side: (() => {
-            const s = args.find(a => a.startsWith('--side'));
-            // Support both --side=YES and --side YES
-            let val = 'BOTH';
-            if (s) {
-                if (s.includes('=')) val = s.split('=')[1];
-                else {
-                    const idx = args.indexOf(s);
-                    if (idx !== -1 && idx < args.length - 1) val = args[idx + 1];
-                }
-            }
-            val = val.toUpperCase();
+            let val = getStringArg('side', 'BOTH').toUpperCase();
             if (['YES', 'NO', 'BOTH'].includes(val)) return val as SideInput;
             return 'BOTH';
         })(),
