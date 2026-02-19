@@ -142,7 +142,7 @@ export interface DipArbConfig {
     info?: boolean;
     redeem?: boolean;
     dashboard?: boolean;
-    strategy?: 'dip' | 'true-arb' | 'btc5m' | 'simple-hedge';
+    strategy?: 'dip' | 'true-arb' | 'btc5m' | 'simple-hedge' | 'mean-reversion';
     minExpectedProfit?: number; // [FIX] Minimum Edge Gate
     makerBias?: MakerBiasConfig; // [NEW] Maker Rebate Logic
     earlyExit?: EarlyExitConfig;
@@ -151,6 +151,7 @@ export interface DipArbConfig {
     tradeSizeUsd?: number; // [NEW] Per-side USD size for Simple Hedge
     limitPrice?: number | string;   // [NEW] Fixed price or Range "0.33-0.35" for Simple Hedge
     cooldownMinutes?: number; // [NEW] Dynamic cooldown
+    side?: 'YES' | 'NO' | 'BOTH';
     // windowMinutes removed
 }
 

@@ -8,6 +8,7 @@ import { TruePairArbStrategy } from "./strategies/TruePairArbStrategy.js";
 import { Bot, BotConfig } from "./bot.js";
 import { PnlManager } from "./lib/pnlManager.js"; // Import PnlManager
 import { SimpleHedgeStrategy } from "./strategies/SimpleHedgeStrategy.js";
+import { MeanReversionStrategy } from "./strategies/MeanReversionStrategy.js";
 import { redeemPositions } from "./scripts/redeem.js";
 
 // --- UI Helpers for Dashboard ---
@@ -140,6 +141,8 @@ async function main() {
         strategy = new Btc5mStrategy(args);
     } else if (args.strategy === 'simple-hedge') {
         strategy = new SimpleHedgeStrategy(args);
+    } else if (args.strategy === 'mean-reversion') {
+        strategy = new MeanReversionStrategy(args);
     } else {
         strategy = new DipArbStrategy(args);
     }

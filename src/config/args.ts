@@ -1,5 +1,7 @@
 import { DipArbConfig } from "../strategies/dipArb.js";
 
+export type SideInput = 'YES' | 'NO' | 'BOTH';
+
 type CoinType = 'BTC' | 'ETH' | 'SOL' | 'XRP';
 
 interface CliArgs {
@@ -18,6 +20,7 @@ interface CliArgs {
     tradeSizeUsd?: number; // [NEW] Per-side USD size for Simple Hedge
     limitPrice?: number | string;   // [NEW] Fixed price for Simple Hedge
     cooldownMinutes?: number; // [NEW] Dynamic cooldown for Simple Hedge
+    side?: SideInput; // [NEW] Side for MeanReversion
 }
 
 function isWeekendLowVolIST(): boolean {
@@ -189,6 +192,14 @@ export function parseCliArgs(): DipArbConfig {
             return 0.35;
         })(),
         cooldownMinutes: getArgValue('cooldown', 10), // Default 10m
+        side: (() => {
+            const s = args.find(a => a.startsWith('--side='));
+            if (s) {
+                const val = s.split('=')[1].toUpperCase();
+                if (['YES', 'NO', 'BOTH'].includes(val)) return val as SideInput;
+            }
+            return 'YES'; // Default to YES if not specified
+        })(),
         verbose: getBoolArg('verbose', false),
         info: args.includes('-info') || args.includes('--info'),
         redeem: args.includes('-redeem') || args.includes('--redeem'),
@@ -196,7 +207,8 @@ export function parseCliArgs(): DipArbConfig {
         // Strategy Selection
         strategy: (args.includes('--arb') || args.includes('-arb')) ? 'true-arb' :
             (args.includes('--btc5m') || args.find(a => a.startsWith('--strategy=btc5m'))) ? 'btc5m' :
-                (args.includes('--simple-hedge') || args.find(a => a.startsWith('--strategy=simple-hedge'))) ? 'simple-hedge' : 'dip',
+                (args.includes('--simple-hedge') || args.find(a => a.startsWith('--strategy=simple-hedge'))) ? 'simple-hedge' :
+                    (args.includes('--mean-reversion') || args.find(a => a.startsWith('--strategy=mean-reversion'))) ? 'mean-reversion' : 'dip',
         makerBias: defaults.makerBias
     };
 }
