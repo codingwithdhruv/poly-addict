@@ -24,21 +24,41 @@ export class PriceSocket {
             return;
         }
 
-        this.subscriptions = assetIds;
-        this.ws = new WebSocket(WS_URL);
+        // Close existing connection if any
+        if (this.ws) {
+            try {
+                this.ws.close();
+            } catch (e) { }
+        }
 
-        this.ws.on("open", () => {
+        this.subscriptions = assetIds;
+        const ws = new WebSocket(WS_URL);
+        this.ws = ws;
+
+        ws.on("open", () => {
             console.log("WebSocket connected. Subscribing...");
-            const msg = {
-                type: "market",
-                assets_ids: this.subscriptions,
-            };
-            this.ws?.send(JSON.stringify(msg));
+            if (ws.readyState === WebSocket.OPEN) {
+                const msg = {
+                    type: "market",
+                    assets_ids: this.subscriptions,
+                };
+                try {
+                    ws.send(JSON.stringify(msg));
+                } catch (err) {
+                    console.error("WS Send error:", err);
+                }
+            }
         });
 
-        this.ws.on("message", (data: WebSocket.RawData) => {
+        ws.on("message", (data: WebSocket.RawData) => {
             try {
-                const parsed = JSON.parse(data.toString());
+                const strData = data.toString();
+                // Handle non-JSON keep-alives or errors if necessary
+                if (!strData.trim().startsWith("{")) {
+                    // console.debug("WS Received non-JSON:", strData);
+                    return;
+                }
+                const parsed = JSON.parse(strData);
                 // Filter for last_trade_price events
                 if (parsed.event_type === "last_trade_price") {
                     if (this.onPriceCallback) {
@@ -46,17 +66,21 @@ export class PriceSocket {
                     }
                 }
             } catch (e) {
-                console.error("WS Parse error:", e);
+                // Suppress noisy JSON errors for "INVALID OPERATION" etc if they persist
+                // console.error("WS Parse error:", e);
             }
         });
 
-        this.ws.on("error", (err) => {
+        ws.on("error", (err) => {
             console.error("WebSocket error:", err);
         });
 
-        this.ws.on("close", () => {
-            console.log("WebSocket closed. Reconnecting in 5s...");
-            setTimeout(() => this.connect(this.subscriptions), 5000);
+        ws.on("close", () => {
+            // Only reconnect if this is still the active socket
+            if (this.ws === ws) {
+                console.log("WebSocket closed. Reconnecting in 5s...");
+                setTimeout(() => this.connect(this.subscriptions), 5000);
+            }
         });
     }
 

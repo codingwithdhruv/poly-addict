@@ -130,8 +130,13 @@ export class SimpleHedgeStrategy implements Strategy {
         for (const [marketId, state] of this.activeMarkets.entries()) {
             // Check Expiry
             if (now >= state.endTime) {
-                await this.handleMarketExpiry(state);
-                this.activeMarkets.delete(marketId);
+                try {
+                    await this.handleMarketExpiry(state);
+                } catch (e) {
+                    console.error(`[SimpleHedge] Error handling expiry for ${state.slug}:`, e);
+                } finally {
+                    this.activeMarkets.delete(marketId);
+                }
                 continue;
             }
 
