@@ -70,6 +70,7 @@ export class SimpleHedgeStrategy implements Strategy {
         neutral: 0
     };
 
+    private isProcessing = false;
     private loopInterval?: NodeJS.Timeout;
 
     constructor(config?: Partial<DipArbConfig>) {
@@ -114,7 +115,16 @@ export class SimpleHedgeStrategy implements Strategy {
         // Main Loop (Every 5s)
         this.loopInterval = setInterval(async () => {
             if (this.destroyed) return;
-            await this.maintenanceLoop();
+            if (this.isProcessing) return; // Skip if busy
+
+            this.isProcessing = true;
+            try {
+                await this.maintenanceLoop();
+            } catch (e) {
+                console.error("[SimpleHedge] Loop Error:", e);
+            } finally {
+                this.isProcessing = false;
+            }
         }, 5000);
 
         // Initial scan
@@ -163,6 +173,8 @@ export class SimpleHedgeStrategy implements Strategy {
         // Log Status
         this.logStatus();
     }
+
+    // ... (checkFills and handleMarketExpiry restored below) ...
 
     private async checkFills(state: MarketState) {
         if (!this.clobClient) return;
@@ -346,6 +358,14 @@ export class SimpleHedgeStrategy implements Strategy {
             prices: new Map()
         };
 
+        // [FIX] Register IMMEDIATELY to prevent double-join race condition
+        this.activeMarkets.set(market.id, state);
+
+        // Subscribe to prices
+        if (this.priceSocket) {
+            this.priceSocket.connect(tokenIds);
+        }
+
         // [FIX] Seed Initial Prices from CLOB to ensure accuracy
         if (this.clobClient) {
             try {
@@ -362,13 +382,6 @@ export class SimpleHedgeStrategy implements Strategy {
             } catch (e) {
                 console.warn(`[SimpleHedge] Failed to fetch initial midpoints: ${e}`);
             }
-        }
-
-        this.activeMarkets.set(market.id, state);
-
-        // Subscribe to prices
-        if (this.priceSocket) {
-            this.priceSocket.connect(tokenIds);
         }
 
         // Generate Random Price for this round
