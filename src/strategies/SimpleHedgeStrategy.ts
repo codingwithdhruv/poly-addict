@@ -102,6 +102,15 @@ export class SimpleHedgeStrategy implements Strategy {
     }
 
     async run(): Promise<void> {
+        // Initial Auto-Redeem on startup
+        console.log(color("🔄 Performing initial Auto-Redeem...", COLORS.CYAN));
+        try {
+            await redeemPositions();
+            console.log(color("✅ Initial Auto-Redeem Complete.", COLORS.GREEN));
+        } catch (e: any) {
+            console.error(color(`❌ Initial Auto-Redeem Failed: ${e.message}`, COLORS.RED));
+        }
+
         // Main Loop (Every 5s)
         this.loopInterval = setInterval(async () => {
             if (this.destroyed) return;
