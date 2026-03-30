@@ -43,7 +43,7 @@ export class PriceSocket {
     private respawnCounter = 0;
     private lastRespawnReset = Date.now();
 
-    constructor(onPrice: (update: PriceUpdate) => void, swarmSize: number = 10) {
+    constructor(onPrice: (update: PriceUpdate) => void, swarmSize: number = 3) {
         this.onPriceCallback = onPrice;
         this.swarmSize = swarmSize;
     }

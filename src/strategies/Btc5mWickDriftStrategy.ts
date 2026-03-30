@@ -350,6 +350,11 @@ export class Btc5mWickDriftStrategy implements Strategy {
             this.pnlManager.closeCycle(state.marketId, 'EXPIRED', 0);
         }
 
+        // [NEW] Unsubscribe from expired tokens to keep the swarm lean
+        if (this.priceSocket) {
+            this.priceSocket.unsubscribe(state.tokenIds);
+        }
+
         await redeemPositions();
         
         if (this.consecutiveFailures >= 2) {
@@ -362,8 +367,9 @@ export class Btc5mWickDriftStrategy implements Strategy {
         const nowSec = Math.floor(Date.now() / 1000);
         const interval = 300;
         const currentSlot = Math.floor(nowSec / interval) * interval;
+        const maxLookahead = 8; // [NEW] Look 40 mins ahead
 
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < maxLookahead; i++) {
             const ts = currentSlot + (i * interval);
             const slug = `${this.COIN.toLowerCase()}-updown-5m-${ts}`;
             if (Array.from(this.activeMarkets.values()).some(m => m.slug === slug)) continue;
@@ -398,13 +404,18 @@ export class Btc5mWickDriftStrategy implements Strategy {
 
         this.activeMarkets.set(m.id, state);
         
-        // [NEW] Delayed connection logic: only connect if within 60s of start
+        // [NEW] Hot-Subscribe to future markets up to 30 minutes early
         const msToStart = start - Date.now();
         if (this.priceSocket) {
-            if (msToStart < 60000) {
-                this.priceSocket.connect(tokenIds);
+            if (msToStart < 1800000) { // 30 minutes
+                console.log(color(`[WickDrift] 🔥 Hot-Subscribing to ${state.slug} (${Math.round(msToStart/60000)}m until start)`, COLORS.CYAN));
+                if (this.priceSocket.isConnected()) {
+                    this.priceSocket.subscribe(tokenIds);
+                } else {
+                    this.priceSocket.connect(tokenIds);
+                }
             } else {
-                console.log(color(`[WickDrift] 💤 Market starts in ${Math.round(msToStart/1000)}s. WS connection deferred.`, COLORS.DIM + COLORS.WHITE));
+                console.log(color(`[WickDrift] 💤 Market ${state.slug} starts in ${Math.round(msToStart/60000)}m. Subscription deferred.`, COLORS.DIM + COLORS.WHITE));
             }
         }
 
