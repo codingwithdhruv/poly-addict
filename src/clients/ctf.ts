@@ -1,4 +1,3 @@
-
 import { ethers, Contract, Wallet } from 'ethers';
 import { CONFIG } from './config.js';
 
@@ -6,6 +5,7 @@ import { CONFIG } from './config.js';
 
 export const CTF_CONTRACT = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
 export const USDC_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; // USDC.e
+export const MULTISEND_CONTRACT = '0x40A2aCCbd92BCA938b02010E17A5b8929b49130D'; // Proxy MultiSend mapping
 export const USDC_DECIMALS = 6;
 
 // ===== ABIs =====
@@ -27,7 +27,8 @@ const ERC20_ABI = [
 ];
 
 const GNOSIS_SAFE_ABI = [
-    'function execTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures) payable returns (bool success)'
+    'function execTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures) payable returns (bool success)',
+    'function nonce() view returns (uint256)'
 ];
 
 // ===== Types =====
@@ -63,6 +64,11 @@ export interface PositionBalance {
 
 // ===== CTF Client =====
 
+/**
+ * CTFClient
+ * Handles Polymarket Conditional Token (CTF) operations: Split, Merge, Redeem.
+ * Supports both EOA and Gnosis Safe Proxy (Gasless Relayer V2) execution.
+ */
 export class CTFClient {
     private provider: ethers.providers.JsonRpcProvider;
     private wallet: Wallet;
@@ -80,9 +86,6 @@ export class CTFClient {
         return this.wallet.address;
     }
 
-    /**
-     * Check if a market is resolved and get payout info
-     */
     async getMarketResolution(conditionId: string): Promise<MarketResolution> {
         const [yesNumerator, noNumerator, denominator] = await Promise.all([
             this.ctfContract.payoutNumerators(conditionId, 0),
@@ -94,11 +97,8 @@ export class CTFClient {
         let winningOutcome: 'YES' | 'NO' | undefined;
 
         if (isResolved) {
-            if (yesNumerator.gt(0) && noNumerator.eq(0)) {
-                winningOutcome = 'YES';
-            } else if (noNumerator.gt(0) && yesNumerator.eq(0)) {
-                winningOutcome = 'NO';
-            }
+            if (yesNumerator.gt(0) && noNumerator.eq(0)) winningOutcome = 'YES';
+            else if (noNumerator.gt(0) && yesNumerator.eq(0)) winningOutcome = 'NO';
         }
 
         return {
@@ -110,298 +110,137 @@ export class CTFClient {
         };
     }
 
-    /**
-     * Get token balances using CLOB API token IDs
-     */
-    async getPositionBalanceByTokenIds(
-        conditionId: string,
-        tokenIds: TokenIds,
-        userAddress?: string
-    ): Promise<PositionBalance> {
-        const address = userAddress || this.wallet.address;
-        const [yesBalance, noBalance] = await Promise.all([
-            this.ctfContract.balanceOf(address, tokenIds.yesTokenId),
-            this.ctfContract.balanceOf(address, tokenIds.noTokenId),
-        ]);
 
-        return {
-            conditionId,
-            yesBalance: ethers.utils.formatUnits(yesBalance, USDC_DECIMALS),
-            noBalance: ethers.utils.formatUnits(noBalance, USDC_DECIMALS),
-            yesPositionId: tokenIds.yesTokenId,
-            noPositionId: tokenIds.noTokenId,
-        };
+
+    /**
+     * Encodes multiple standard transactions into a single Gnosis Safe MultiSend byte payload.
+     * Compatible with MultiSend deployed at MULTISEND_CONTRACT.
+     */
+    private encodeMultiSend(txs: { to: string; data: string; value: string }[]): string {
+        let encodedTxs = "0x";
+        for (const tx of txs) {
+            const operation = 0; // 0 = Call
+            const to = tx.to.toLowerCase().slice(2);
+            const value = ethers.utils.hexZeroPad(ethers.BigNumber.from(tx.value || 0).toHexString(), 32).slice(2);
+            
+            const data = tx.data.startsWith('0x') ? tx.data.slice(2) : tx.data;
+            const dataLength = ethers.utils.hexZeroPad(ethers.utils.hexlify(data.length / 2), 32).slice(2);
+            
+            encodedTxs += ethers.utils.hexZeroPad(ethers.utils.hexlify(operation), 1).slice(2) + to + value + dataLength + data;
+        }
+
+        const multiSendAbi = ["function multiSend(bytes transactions)"];
+        const iface = new ethers.utils.Interface(multiSendAbi);
+        return iface.encodeFunctionData("multiSend", [encodedTxs]);
     }
 
     /**
-     * Redeem winning tokens using Polymarket token IDs (Polymarket CLOB)
+     * Submit transactions gaslessly via the Relayer V2
+     * Combines >1 transactions natively using Gnosis MultiSend struct.
      */
-    async redeemByTokenIds(
-        conditionId: string,
-        tokenIds: TokenIds,
-        outcome?: string | 'BOTH',
-        isProxy: boolean = false
-    ): Promise<RedeemResult> {
-        // Check resolution status
-        const resolution = await this.getMarketResolution(conditionId);
-        if (!resolution.isResolved) {
-            throw new Error('Market is not resolved yet');
+    async executeV2Relayer(txs: { to: string; data: string; value: string; }[]): Promise<boolean> {
+        if (!CONFIG.RELAYER_API_KEY || !CONFIG.RELAYER_API_KEY_ADDRESS || !CONFIG.POLY_PROXY_ADDRESS) {
+            console.warn("⚠️ Relayer V2 Config Incomplete. Falling back to EOA direct.");
+            return false; 
         }
 
-        // Auto-detect outcome if not provided (and not 'BOTH')
-        const winningOutcome = outcome || resolution.winningOutcome;
-        if (!winningOutcome) {
-            throw new Error('Could not determine winning outcome');
+        const proxyWallet = CONFIG.POLY_PROXY_ADDRESS;
+        
+        // BATCHING LOGIC
+        let finalTxs = txs;
+        let isBatch = false;
+        
+        if (txs.length > 1) {
+            const multiSendData = this.encodeMultiSend(txs);
+            finalTxs = [{
+                to: MULTISEND_CONTRACT,
+                data: multiSendData,
+                value: "0"
+            }];
+            isBatch = true;
+            console.log(`[RelayerV2] Bundled ${txs.length} transactions into a MultiSend Execute Call.`);
         }
 
-        const targetAddress = isProxy && CONFIG.POLY_PROXY_ADDRESS ? CONFIG.POLY_PROXY_ADDRESS : this.wallet.address;
+        let totalSuccess = true;
 
-        let tokenBalance = "0";
-        if (winningOutcome !== 'BOTH') {
-            // Get token balance using Polymarket token IDs
-            const balances = await this.getPositionBalanceByTokenIds(conditionId, tokenIds, targetAddress);
-            tokenBalance = winningOutcome === 'YES' ? balances.yesBalance : balances.noBalance;
+        for (let i = 0; i < finalTxs.length; i++) {
+            const tx = finalTxs[i];
+            const nonceResult = await this.getRelayerNonce(this.wallet.address);
+            const nonce = parseInt(nonceResult);
+            const value = tx.value || "0";
+            
+            // 1 for DelegateCall if multiSend batch, 0 for Call if single tx 
+            const operation = isBatch ? 1 : 0;
+            
+            // AUDIT FIX: Harden safe verification with official domain
+            const signature = await this.signSafeTransaction(
+                proxyWallet,
+                tx.to,
+                value,
+                tx.data,
+                operation, // Updated
+                0, 0, "0",
+                ethers.constants.AddressZero,
+                ethers.constants.AddressZero,
+                nonce
+            );
 
-            if (parseFloat(tokenBalance) === 0) {
-                throw new Error(`No ${winningOutcome} tokens to redeem`);
+            const payload = {
+                from: this.wallet.address,
+                to: tx.to,
+                proxyWallet: proxyWallet,
+                data: tx.data,
+                nonce: nonce.toString(),
+                signature: signature,
+                signatureParams: {
+                    gasPrice: "0",
+                    operation: operation.toString(), // Updated to match
+                    safeTxnGas: "0",
+                    baseGas: "0",
+                    gasToken: ethers.constants.AddressZero,
+                    refundReceiver: ethers.constants.AddressZero
+                },
+                type: "SAFE",
+                metadata: ""
+            };
+
+            console.log(`[RelayerV2] Submitting gasless tx (${i+1}/${finalTxs.length}) for ${proxyWallet}...`);
+            const response = await fetch("https://relayer-v2.polymarket.com/submit", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "RELAYER_API_KEY": CONFIG.RELAYER_API_KEY,
+                    "RELAYER_API_KEY_ADDRESS": CONFIG.RELAYER_API_KEY_ADDRESS
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const text = await response.text();
+                console.error(`❌ Relayer V2 Error (${response.status}):`, text);
+                totalSuccess = false;
+                break;
             }
+            
+            const resData = await response.json() as any;
+            console.log(`✅ Relayer V2 Registered: ID ${resData.transactionID || resData.id}`);
+            
+            if (i < finalTxs.length - 1) await new Promise(r => setTimeout(r, 2000));
         }
-
-        console.log(`Redeeming ${winningOutcome === 'BOTH' ? 'ALL' : winningOutcome} tokens from ${targetAddress}...`);
-
-        // indexSets: [1] for YES, [2] for NO, [1, 2] for BOTH
-        const indexSets = winningOutcome === 'BOTH' ? [1, 2] : (winningOutcome === 'YES' ? [1] : [2]);
-
-        // 1.5 multiplier for gas
-        const gasPrice = await this.provider.getGasPrice();
-        const gasOptions = {
-            gasPrice: gasPrice.mul(15).div(10)
-        };
-
-        let tx;
-        if (isProxy) {
-            // PROXY REDEMPTION via Gnosis Safe execTransaction
-            if (!CONFIG.POLY_PROXY_ADDRESS) throw new Error("Proxy address required for proxy redemption");
-            const proxyContract = new Contract(CONFIG.POLY_PROXY_ADDRESS, GNOSIS_SAFE_ABI, this.wallet);
-
-            // Encode the inner call: redeemPositions(...)
-            const innerData = this.ctfContract.interface.encodeFunctionData("redeemPositions", [
-                USDC_CONTRACT,
-                ethers.constants.HashZero,
-                conditionId,
-                indexSets
-            ]);
-
-            // Prepare execTransaction params
-            const to = CTF_CONTRACT;
-            const value = 0;
-            const data = innerData;
-            const operation = 0; // Call
-            const safeTxGas = 0;
-            const baseGas = 0;
-            const gasToken = ethers.constants.AddressZero;
-            const refundReceiver = ethers.constants.AddressZero;
-            const nonce = await this.getSafeNonce(CONFIG.POLY_PROXY_ADDRESS);
-
-            // Sign the transaction
-            // Hash: keccak256(pack(folder, ...)) - Simplified: We use EIP-712 or standard safe hash
-            // Actually, for single owner safe (or threshold 1), we can sign the hash.
-            // Polymarket proxies are usually 1/1 ownership setups controlled by the EOA.
-            // We need to calculate the SafeTxHash and sign it.
-
-            const signature = await this.signSafeTransaction(
-                CONFIG.POLY_PROXY_ADDRESS,
-                to,
-                value,
-                data,
-                operation,
-                safeTxGas,
-                baseGas,
-                gasPrice.toString(),
-                gasToken,
-                refundReceiver,
-                nonce
-            );
-
-            console.log(`Sending Proxy Transaction...`);
-            tx = await proxyContract.execTransaction(
-                to,
-                value,
-                data,
-                operation,
-                safeTxGas,
-                baseGas,
-                0, // gasPrice in safe logic (usually 0 if relayer pays or self-pay)
-                gasToken,
-                refundReceiver,
-                signature,
-                gasOptions
-            );
-
-        } else {
-            // STANDARD EOA REDEMPTION
-            tx = await this.ctfContract.redeemPositions(
-                USDC_CONTRACT,
-                ethers.constants.HashZero,
-                conditionId,
-                indexSets,
-                gasOptions
-            );
-        }
-
-        console.log(`Tx sent: ${tx.hash}`);
-        const receipt = await tx.wait();
-
-        return {
-            success: true,
-            txHash: receipt.transactionHash,
-            outcome: winningOutcome,
-            tokensRedeemed: tokenBalance,
-            usdcReceived: tokenBalance, // 1:1 for winning outcome
-        };
+        return totalSuccess;
     }
 
-    /**
-     * Merge positions to recover collateral (if holding both YES and NO)
-     */
-    async mergeByTokenIds(
-        conditionId: string,
-        tokenIds: TokenIds,
-        amount: string,
-        isProxy: boolean = false
-    ): Promise<RedeemResult> {
-        console.log(`Merging ${amount} sets...`);
-
-        // Partition: [1, 2] for Yes + No
-        const partition = [1, 2];
-        const amountWei = ethers.utils.parseUnits(amount, USDC_DECIMALS);
-
-        // 1.5 multiplier for gas
-        const gasPrice = await this.provider.getGasPrice();
-        const gasOptions = {
-            gasPrice: gasPrice.mul(15).div(10)
-        };
-
-        const targetAddress = isProxy && CONFIG.POLY_PROXY_ADDRESS ? CONFIG.POLY_PROXY_ADDRESS : this.wallet.address;
-
-        let tx;
-        if (isProxy) {
-            // PROXY MERGE
-            if (!CONFIG.POLY_PROXY_ADDRESS) throw new Error("Proxy address required for proxy merge");
-            const proxyContract = new Contract(CONFIG.POLY_PROXY_ADDRESS, GNOSIS_SAFE_ABI, this.wallet);
-
-            const innerData = this.ctfContract.interface.encodeFunctionData("mergePositions", [
-                USDC_CONTRACT,
-                ethers.constants.HashZero,
-                conditionId,
-                partition,
-                amountWei
-            ]);
-
-            const nonce = await this.getSafeNonce(CONFIG.POLY_PROXY_ADDRESS);
-            const signature = await this.signSafeTransaction(
-                CONFIG.POLY_PROXY_ADDRESS,
-                CTF_CONTRACT,
-                0,
-                innerData,
-                0,
-                0,
-                0,
-                gasPrice.toString(),
-                ethers.constants.AddressZero,
-                ethers.constants.AddressZero,
-                nonce
-            );
-
-            console.log(`Sending Proxy Merge Transaction...`);
-            tx = await proxyContract.execTransaction(
-                CTF_CONTRACT,
-                0,
-                innerData,
-                0,
-                0,
-                0,
-                0,
-                ethers.constants.AddressZero,
-                ethers.constants.AddressZero,
-                signature,
-                gasOptions
-            );
-
-        } else {
-            // EOA MERGE
-            tx = await this.ctfContract.mergePositions(
-                USDC_CONTRACT,
-                ethers.constants.HashZero,
-                conditionId,
-                partition,
-                amountWei,
-                gasOptions
-            );
-        }
-
-        console.log(`Merge Tx sent: ${tx.hash}`);
-        const receipt = await tx.wait();
-
-        return {
-            success: true,
-            txHash: receipt.transactionHash,
-            outcome: "MERGE",
-            tokensRedeemed: amount,
-            usdcReceived: amount,
-        };
-    }
-
-    // --- Transaction Builders for Batching ---
-
-    getMergeTransaction(conditionId: string, amount: string): { to: string; data: string; value: string } {
-        const partition = [1, 2];
-        const amountWei = ethers.utils.parseUnits(amount, USDC_DECIMALS);
-
-        const data = this.ctfContract.interface.encodeFunctionData("mergePositions", [
-            USDC_CONTRACT,
-            ethers.constants.HashZero,
-            conditionId,
-            partition,
-            amountWei
-        ]);
-
-        return {
-            to: CTF_CONTRACT,
-            data,
-            value: "0"
-        };
-    }
-
-    getRedeemTransaction(conditionId: string): { to: string; data: string; value: string } {
-        // Redeem both YES (1) and NO (2) slots to ensure full cleanup (winners paid, losers burned)
-        const indexSets = [1, 2];
-
-        const data = this.ctfContract.interface.encodeFunctionData("redeemPositions", [
-            USDC_CONTRACT,
-            ethers.constants.HashZero,
-            conditionId,
-            indexSets
-        ]);
-
-        return {
-            to: CTF_CONTRACT,
-            data,
-            value: "0"
-        };
-    }
-
-    // --- Helper for Safe Signing ---
-
-    private async getSafeNonce(safeAddress: string): Promise<number> {
-        const safe = new Contract(safeAddress, ['function nonce() view returns (uint256)'], this.provider);
-        return (await safe.nonce()).toNumber();
+    async getRelayerNonce(signerAddress: string): Promise<string> {
+        const res = await fetch(`https://relayer-v2.polymarket.com/nonce?address=${signerAddress}&type=SAFE`);
+        if (!res.ok) throw new Error(`Relayer nonce fetch failed: ${res.statusText}`);
+        const data = await res.json() as any;
+        return data.nonce;
     }
 
     private async signSafeTransaction(
         safeAddress: string,
         to: string,
-        value: number,
+        value: string | number,
         data: string,
         operation: number,
         safeTxGas: number,
@@ -412,44 +251,102 @@ export class CTFClient {
         nonce: number
     ): Promise<string> {
 
-        // EIP-712 Domain
+        // AUDIT FIX: Use strict Gnosis Safe domain for 100% compatibility
         const domain = {
-            verifyingContract: safeAddress,
-            chainId: CONFIG.CHAIN_ID || 137
+            chainId: CONFIG.CHAIN_ID || 137,
+            verifyingContract: safeAddress
         };
 
-        const EIP712_SAFE_TX_TYPE = {
+        const types = {
             SafeTx: [
-                { type: "address", name: "to" },
-                { type: "uint256", name: "value" },
-                { type: "bytes", name: "data" },
-                { type: "uint8", name: "operation" },
-                { type: "uint256", name: "safeTxGas" },
-                { type: "uint256", name: "baseGas" },
-                { type: "uint256", name: "gasPrice" },
-                { type: "address", name: "gasToken" },
-                { type: "address", name: "refundReceiver" },
-                { type: "uint256", name: "nonce" }
+                { name: "to", type: "address" },
+                { name: "value", type: "uint256" },
+                { name: "data", type: "bytes" },
+                { name: "operation", type: "uint8" },
+                { name: "safeTxGas", type: "uint256" },
+                { name: "baseGas", type: "uint256" },
+                { name: "gasPrice", type: "uint256" },
+                { name: "gasToken", type: "address" },
+                { name: "refundReceiver", type: "address" },
+                { name: "nonce", type: "uint256" }
             ]
         };
 
-        const safeTx = {
+        const values = {
             to,
-            value,
+            value: ethers.BigNumber.from(value).toString(),
             data,
             operation,
-            safeTxGas,
-            baseGas,
-            gasPrice: 0, // usually 0 for self-signed immediate exec
+            safeTxGas: safeTxGas.toString(),
+            baseGas: baseGas.toString(),
+            gasPrice,
             gasToken,
             refundReceiver,
             nonce
         };
 
-        // Sign using Ethers _signTypedData (v5) or signTypedData (v6)
-        // Check ethers version in package.json (usually v5.7.2)
-        // Wallet supports _signTypedData
-        const signature = await (this.wallet as any)._signTypedData(domain, EIP712_SAFE_TX_TYPE, safeTx);
-        return signature;
+        // Polymarket Relayer strictly expects standard EOA eth_sign instead of EIP-712 strings
+        // So we manually struct-hash and then append the correct v offset based on standard spec.
+        const structHash = ethers.utils._TypedDataEncoder.hash(domain, types, values);
+        const sigEthers = await this.wallet.signMessage(ethers.utils.arrayify(structHash));
+        
+        let sigV = parseInt(sigEthers.slice(-2), 16);
+        if (sigV === 27 || sigV === 28) { sigV += 4; }
+        
+        return sigEthers.slice(0, -2) + sigV.toString(16);
+    }
+
+    // --- High-Level Commands ---
+
+    async mergePositionsDirect(conditionId: string, amount: string, isProxy: boolean = false): Promise<RedeemResult> {
+        const amountWei = ethers.utils.parseUnits(amount, USDC_DECIMALS);
+        const data = this.ctfContract.interface.encodeFunctionData("mergePositions", [USDC_CONTRACT, ethers.constants.HashZero, conditionId, [1, 2], amountWei]);
+
+        let txHash = "";
+        if (isProxy) {
+            const success = await this.executeV2Relayer([{ to: CTF_CONTRACT, data, value: "0" }]);
+            if (!success) throw new Error("Relayer V2 merge failed");
+            txHash = "submitted_via_relayer";
+        } else {
+            const gasPrice = await this.provider.getGasPrice();
+            const tx = await this.ctfContract.mergePositions(USDC_CONTRACT, ethers.constants.HashZero, conditionId, [1, 2], amountWei, { gasPrice: gasPrice.mul(15).div(10) });
+            const receipt = await tx.wait();
+            txHash = receipt.transactionHash;
+        }
+
+        return { success: true, txHash, outcome: "MERGE", tokensRedeemed: amount, usdcReceived: amount };
+    }
+
+    async redeemPositionsDirect(conditionId: string, outcome?: string, isProxy: boolean = false): Promise<RedeemResult> {
+        const res = await this.getMarketResolution(conditionId);
+        if (!res.isResolved) throw new Error('Market not resolved');
+
+        const indexSets = [1, 2];
+        const data = this.ctfContract.interface.encodeFunctionData("redeemPositions", [USDC_CONTRACT, ethers.constants.HashZero, conditionId, indexSets]);
+
+        let txHash = "";
+        if (isProxy) {
+            const success = await this.executeV2Relayer([{ to: CTF_CONTRACT, data, value: "0" }]);
+            if (!success) throw new Error("Relayer V2 submission failed");
+            txHash = "submitted_via_relayer";
+        } else {
+            const gasPrice = await this.provider.getGasPrice();
+            const tx = await this.ctfContract.redeemPositions(USDC_CONTRACT, ethers.constants.HashZero, conditionId, indexSets, { gasPrice: gasPrice.mul(15).div(10) });
+            const receipt = await tx.wait();
+            txHash = receipt.transactionHash;
+        }
+
+        return { success: true, txHash, outcome: outcome || res.winningOutcome || "UNKNOWN", tokensRedeemed: "0", usdcReceived: "0" };
+    }
+
+    getMergeTransaction(conditionId: string, amount: string): { to: string; data: string; value: string } {
+        const amountWei = ethers.utils.parseUnits(amount, USDC_DECIMALS);
+        const data = this.ctfContract.interface.encodeFunctionData("mergePositions", [USDC_CONTRACT, ethers.constants.HashZero, conditionId, [1, 2], amountWei]);
+        return { to: CTF_CONTRACT, data, value: "0" };
+    }
+
+    getRedeemTransaction(conditionId: string): { to: string; data: string; value: string } {
+        const data = this.ctfContract.interface.encodeFunctionData("redeemPositions", [USDC_CONTRACT, ethers.constants.HashZero, conditionId, [1, 2]]);
+        return { to: CTF_CONTRACT, data, value: "0" };
     }
 }

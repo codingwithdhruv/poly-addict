@@ -78,6 +78,10 @@ export const CONFIG = {
     // New list
     BUILDER_CREDS_LIST: getBuilderCreds(),
 
+    // Relayer V2 Auth
+    RELAYER_API_KEY: process.env.RELAYER_API_KEY || "",
+    RELAYER_API_KEY_ADDRESS: process.env.RELAYER_API_KEY_ADDRESS || "",
+
     // Optional: Proxy / Gnosis Safe Configuration
     // If set, the bot will act as this proxy address
     POLY_PROXY_ADDRESS: process.env.POLY_PROXY_ADDRESS,

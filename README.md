@@ -1,130 +1,136 @@
-# 🦅 Poly-Addict
-> *High-Frequency Prediction Market Trading Suite for Polymarket (Polygon)*
+# 🛡️ Poly-Addict: High-Performance Polymarket Trading Suite
 
-**Poly-Addict** is an institutional-grade algorithmic trading bot engineered for the Polymarket ecosystem. It specializes in volatility harvesting ("The Gabagool"), atomic arbitrage, and market making, backed by robust safety mechanisms including WalletGuard™ and Proxy Integration.
+A "God-Tier" trading suite for Polymarket, optimized for low-latency market data, gasless transaction execution, and seamless multi-market rotation. 
+
+Built with a **WebSocket Swarm** (50+ connections) and **Relayer V2** integration for zero-gas maintenance.
 
 ---
 
-## ⚡️ Quick Copy-Paste Commands
+## 🚀 Quick Start
 
-### 🟢 1. Simple Hedge (Passive Market Making)
-*Best for: Passive income on 5m volatility. Places dual limit orders to capture spread.*
-
+### 1. Installation & Build
 ```bash
-# Default (35c fixed price, $20 size, 10m cooldown)
-./trade btc --simple-hedge
-
-# Randomized Price Range (e.g. 0.33-0.35)
-./trade btc --simple-hedge --price=0.33-0.35
-
-# Custom Setup (Larger size, Longer cooldown)
-./trade btc --simple-hedge --size=50 --cooldown=15
+npm install
+npm run build
 ```
 
-### 🔴 2. The Gabagool (Dip Buying)
-*Best for: Catching panic dumps. Buys when price crashes X% in Y seconds.*
-
-```bash
-# Aggressive BTC Dip Buying (15% drop, 50 shares)
-./trade btc --dip=0.15 --shares=50
-
-# Conservative ETH Dip Buying (25% drop)
-./trade eth --dip=0.25
+### 2. Environment Setup
+Create a `.env` file in the root directory (refer to `.env.example`):
+```env
+PK=YOUR_EOA_PRIVATE_KEY
+POLY_API_KEY=YOUR_BUILDER_API_KEY
+POLY_API_SECRET=YOUR_BUILDER_API_SECRET
+POLY_API_PASSPHRASE=YOUR_BUILDER_PASSPHRASE
+POLY_PROXY_ADDRESS=YOUR_PROXY_WALLET_ADDRESS
+RELAYER_API_KEY=YOUR_RELAYER_API_KEY
+RELAYER_API_KEY_ADDRESS=0x... (EOA Address)
 ```
 
-### 🔵 3. BTC 5m Scalper
-*Best for: High-velocity scalping on 5-minute markets.*
-
+### 3. Execution Shortcuts (Recommended)
+The fastest way to run the bot is using the included shell wrappers:
 ```bash
-# Run 5m Scalper
-./trade btc --strategy=btc5m
+chmod +x trade arb
+./trade btc          # Starts default 15m Dip/Arb for BTC
+./arb eth            # Starts True Pair Arb for ETH
 ```
 
 ---
 
-## 🔧 Configuration Flags
+## 🐚 Master Shell Utility Guide
 
-### 🤖 Strategy: Simple Hedge
-*Usage: `./trade <COIN> --simple-hedge [FLAGS]`*
+These scripts are the primary way to interact with the bot. They bypass slow build checks and automate flag construction.
 
-| Flag | Description | Default | Example |
+### 📈 The `trade` Script (`./trade`)
+Used for all standard directional and volatility strategies.
+
+**Core Syntax:**
+```bash
+./trade <coin> [optional_flags]
+```
+
+**Features:**
+- **Auto-Normalization**: Accepts `btc`, `BTC`, `--btc`, or `-btc` interchangeably.
+- **Integrated Maintenance**: Quick access to bot tools using the coin slot:
+    - `./trade -info`      : View balance and API status.
+    - `./trade -redeem`    : Manual gasless redemption.
+    - `./trade -dashboard` : Start the live PnL dashboard.
+
+**Common Examples:**
+```bash
+./trade btc --btc5m          # BTC 5m Volatility (High Frequency)
+./trade eth --shares=50      # ETH 15m Dip Arbs with custom size
+./trade xrp --simple-hedge   # XRP 5m Fixed Price Hedging (35c default)
+```
+
+### ⚖️ The `arb` Script (`./arb`)
+Specifically designed for the **True Pair Arbitrage** strategy. It forces the `-arb` flag and sets the strategy to `Generic15mPairArbStrategy`.
+
+**Core Syntax:**
+```bash
+./arb <coin> [optional_flags]
+```
+
+**Common Examples:**
+```bash
+./arb btc                    # Standard BTC 15m Pair Arb
+./arb eth --target=0.97      # Aggressive ETH Arb (Entry @ $0.97 cost)
+```
+
+---
+
+## 🛠 Trading Strategy Reference
+
+| Flag | Strategy Name | Timeframe | Description |
 | :--- | :--- | :--- | :--- |
-| `--price` | Fixed price OR Range | `0.35` | `--price=0.33-0.35` |
-| `--size` | Trade size in USD per side | `20` | `--size=100` |
-| `--cooldown` | Pause duration (mins) after failure | `10` | `--cooldown=5` |
-
-### 📉 Strategy: Dip Arbitrage (Gabagool)
-*Usage: `./trade <COIN> [FLAGS]` (Default Strategy)*
-
-| Flag | Description | Default |
-| :--- | :--- | :--- |
-| `--dip` | Price drop % to trigger buy (0.25 = 25%) | *Var* |
-| `--target` | Sum Target to exit (AvgYes + AvgNo) | `0.96` |
-| `--shares` | Max shares per clip | *Var* |
-| `--timeout` | Max wait (sec) before Force Hedge | *Var* |
-| `--min-profit` | Min Expected Profit per trade ($) | *Var* |
-| `--min-price` | Minimum price to trade (avoid dust) | `0.06` |
-
-### 🌍 System Flags
-*Applies to all strategies.*
-
-| Flag | Description | Default |
-| :--- | :--- | :--- |
-| `--coin=<COIN>` | Target Asset (BTC, ETH, SOL, XRP) | `ETH` |
-| `--redeem` | Redeem all winning positions and exit | `false` |
-| `--dashboard` | Launch standalone PnL Dashboard | `false` |
-| `--info` | Show wallet balances and exit | `false` |
-| `--verbose` | Enable debug logs | `false` |
+| `(default)` | **Generic 15m Dip/Arb** | 15m | The master strategy. Uses weighted averages to enter on price "dips". |
+| `--btc5m` | **BTC 5m Volatility** | 5m | Ultra high-frequency trading for fast-moving 5-minute markets. |
+| `--arb` | **Generic 15m Pair Arb** | 15m | Pure logical arbitrage. Enters when Yes + No cost combined < $1.00. |
+| `--simple-hedge`| **BTC 5m Fixed Hedge** | 5m | Yield-focused. Places resting limit orders (e.g. 35c) to capture premiums. |
+| `--usa-session` | **BTC 15m Extreme** | 15m | "Fat-finger" hunter. Places 1c buy orders to catch outlier fills. |
 
 ---
 
-## 🚀 Features
+## ⚙️ Advanced Parameter Tuning
 
-### 🧠 Strategic Engines
-1.  **The Gabagool (Dip Arbitrage)**
-    *   **Logic**: Exploits mean-reversion in binary markets. Accumulates heavily when spreads widen (panic dumps) and exits when spreads normalize.
-    *   **Best For**: High-volatility events (Election nights, Sporting upsets).
-
-2.  **Simple Hedge (Neutral Market Making)**
-    *   **Logic**: Places dormant limit orders on both sides (Yes/No) to capture spread and volatility.
-    *   **Behavior**: Joins 5-minute markets, places dual orders.
-    *   **Smart Features**:
-        *   **Randomized Pricing**: Avoids predictability by varying limit prices.
-        *   **Auto-Redeem**: Claims winnings immediately after market expiry.
-        *   **Strict Cooldown**: Pauses trading if hedge fails (partial fills) to protect capital.
-
-3.  **BTC 5m Scalper**
-    *   **Logic**: Specialized high-velocity strategy for 5-minute BTC markets with tighter timing.
-
-### 🛡️ Safety Systems
-*   **WalletGuard™**: Prevents capital over-commitment by tracking in-flight orders.
-*   **Force Hedge**: Automatically neutralizes delta if a leg fails to fill.
-*   **Proxy Support**: Native integration for Gnosis Safe / Relayer execution (Gasless).
+| Flag | Default | Description |
+| :--- | :--- | :--- |
+| `--dip=0.15` | `0.15` | Size of the dip required to trigger an entry (0.15 = 15% drop). |
+| `--shares=10` | `10` | Number of shares to purchase per "tick" of opportunity. |
+| `--target=0.95`| `0.95`| The Max Pair Cost (YES+NO) to stop buying. |
+| `--window=3000` | `3000` | Sliding window in ms for weighted average calculation. |
+| `--timeout=60` | `60` | Seconds to wait for leg 2 before forcing a hedge. |
+| `--price=35` | `35` | Fixed price in cents for `--simple-hedge` or `--usa-session`. |
 
 ---
 
-## 📦 Installation
+## 📊 Maintenance & Debugging
 
-1.  **Clone & Install**
-    ```bash
-    git clone <repo-url>
-    cd poly-addict
-    npm install
-    ```
+### One-off Redemption
+```bash
+./trade -redeem
+```
+*Note: The bot also auto-redeems in the background every 60s during sessions.*
 
-2.  **Environment Config**
-    Create a `.env` file from `.env.example`:
-    ```env
-    RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY
-    PRIVATE_KEY=0xYOUR_PRIVATE_KEY
-    ```
+### Live Dashboard
+```bash
+./trade -dashboard
+```
 
-3.  **Build**
-    ```bash
-    npm run build
-    ```
+### Market Debugger
+If you notice skipped markets, use the standalone debugger to check Gamma API sync:
+```bash
+npm run dev -- src/scripts/debug_markets.ts
+```
+
+---
+
+## ⚡ Features
+- **50+ WebSocket Swarm**: Low-latency data with jitter-reaper protection.
+- **Lazy Loading (Pre-Warming)**: Proactively connects to the *next* market 30s early for zero-gap trading.
+- **Atomic Entry Locks**: Mutex-protected tick processing to prevent "Double Buys."
+- **Gasless Relayer V2**: Compliance with official Gnosis Safe EIP-712 domains.
 
 ---
 
 ## ⚠️ Disclaimer
-*Prediction markets are volatile. Use at your own risk. The authors accept no liability for financial losses.*
+This is experimental software. Trading carries risk. Always test with small sizes first.

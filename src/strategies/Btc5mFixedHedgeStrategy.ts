@@ -1,11 +1,12 @@
 
 import { Strategy } from "./types.js";
-import { ClobClient, Side, OrderType } from "@polymarket/clob-client";
-import { RelayClient } from "@polymarket/builder-relayer-client";
+import { ClobClient, Side, OrderType, AssetType } from "@polymarket/clob-client";
 import { GammaClient } from "../clients/gamma-api.js";
 import { PriceSocket } from "../clients/websocket.js";
-import { DipArbConfig } from "./dipArb.js";
+import { WeightedStrategyConfig } from "./BaseWeightedStrategy.js";
+export type DipArbConfig = WeightedStrategyConfig;
 import { redeemPositions } from "../scripts/redeem.js";
+import { PriceLogger } from "../lib/priceLogger.js";
 
 // --- UI / ANSI Helpers ---
 const COLORS = {
@@ -37,10 +38,13 @@ interface MarketState {
     ordersPlaced: boolean;
     startTime: number;
     prices: Map<string, number>; // Latest price per token
+    status: 'ACTIVE' | 'EXPIRED'; // [NEW] Lifecycle tracking
+    targetShares: number;         // [NEW] Per-market size tracking
+    roundPrice: number;           // [NEW] Per-market price tracking
 }
 
-export class SimpleHedgeStrategy implements Strategy {
-    name = "Simple Hedge (Resting 35c)";
+export class Btc5mFixedHedgeStrategy implements Strategy {
+    name = "BTC 5m Fixed Hedge Strategy";
 
     // Clients
     private clobClient?: ClobClient;
@@ -50,6 +54,7 @@ export class SimpleHedgeStrategy implements Strategy {
     // Configuration
     private readonly MAX_CONCURRENT = 1; // [FIX] Strict single-market discipline
     private tradeSizeUsd = 20; // Default $20
+    private tradeShares = 0;   // [NEW] Fixed share count prioritize if > 0
     private minPrice = 0.35;
     private maxPrice = 0.35;
     private currentRoundPrice = 0.35; // Selected price for the "current" market
@@ -80,6 +85,9 @@ export class SimpleHedgeStrategy implements Strategy {
         if (config?.tradeSizeUsd) {
             this.tradeSizeUsd = config.tradeSizeUsd;
         }
+        if (config?.shares) {
+            this.tradeShares = config.shares;
+        }
         if (config?.limitPrice) {
             if (typeof config.limitPrice === 'number') {
                 this.minPrice = config.limitPrice;
@@ -97,9 +105,10 @@ export class SimpleHedgeStrategy implements Strategy {
         }
     }
 
-    async init(clobClient: ClobClient, relayClient: RelayClient): Promise<void> {
+    async init(clobClient: ClobClient): Promise<void> {
         this.clobClient = clobClient;
-        console.log(`[SimpleHedge] Init: Max ${this.MAX_CONCURRENT} mkt, $${this.tradeSizeUsd}/side @ ${this.minPrice}-${this.maxPrice}c (Cooldown: ${this.COOLDOWN_MS / 60000}m)`);
+        const sizeDesc = this.tradeShares > 0 ? `${this.tradeShares} shares` : `$${this.tradeSizeUsd}/side`;
+        console.log(`[Btc5mHedge] Init: Max ${this.MAX_CONCURRENT} mkt, ${sizeDesc} @ ${this.minPrice}-${this.maxPrice}c (Cooldown: ${this.COOLDOWN_MS / 60000}m)`);
     }
 
     async run(): Promise<void> {
@@ -121,7 +130,7 @@ export class SimpleHedgeStrategy implements Strategy {
             try {
                 await this.maintenanceLoop();
             } catch (e) {
-                console.error("[SimpleHedge] Loop Error:", e);
+                console.error("[Btc5mHedge] Loop Error:", e);
             } finally {
                 this.isProcessing = false;
             }
@@ -137,37 +146,48 @@ export class SimpleHedgeStrategy implements Strategy {
         // 1. Check Cooldown
         if (this.cooldownUntil && now < this.cooldownUntil) {
             const left = Math.ceil((this.cooldownUntil - now) / 1000);
-            if (left % 30 === 0) console.log(`[SimpleHedge] Cooling down... ${left}s remaining.`);
+            if (left % 30 === 0) console.log(`[Btc5mHedge] Cooling down... ${left}s remaining.`);
             return;
         } else if (this.cooldownUntil && now >= this.cooldownUntil) {
-            console.log(`[SimpleHedge] Cooldown expired. Resuming operations.`);
+            console.log(`[Btc5mHedge] Cooldown expired. Resuming operations.`);
             this.cooldownUntil = null;
             this.consecutiveFailures = 0; // Reset counter
         }
 
         // 2. Manage Active Markets
+        let minTimeLeft = Infinity;
         for (const [marketId, state] of this.activeMarkets.entries()) {
             // Check Expiry
-            if (now >= state.endTime) {
-                try {
-                    await this.handleMarketExpiry(state);
-                } catch (e) {
-                    console.error(`[SimpleHedge] Error handling expiry for ${state.slug}:`, e);
-                } finally {
+            if (now >= state.endTime && state.status !== 'EXPIRED') {
+                state.status = 'EXPIRED';
+                // Fire and forget (don't block the loop)
+                this.handleMarketExpiry(state).then(() => {
                     this.activeMarkets.delete(marketId);
-                }
+                }).catch(e => {
+                    console.error(`[Btc5mHedge] Expiry error for ${state.slug}:`, e);
+                    this.activeMarkets.delete(marketId);
+                });
                 continue;
             }
 
+            if (state.status === 'ACTIVE') {
+                const timeLeft = Math.max(0, (state.endTime - now) / 1000);
+                if (timeLeft < minTimeLeft) minTimeLeft = timeLeft;
+            }
+
             // Check Fills (if orders placed)
-            if (state.ordersPlaced) {
+            if (state.ordersPlaced && state.status === 'ACTIVE') {
                 await this.checkFills(state);
             }
         }
 
-        // 3. Scan for New Markets (if slots available)
-        if (this.activeMarkets.size < this.MAX_CONCURRENT && !this.cooldownUntil) {
-            await this.findAndJoinMarket();
+        // 3. Scan for New Markets (if slots available or transition window)
+        // Transition Rule: Start looking for next market if < 60s left in current
+        const activeCount = Array.from(this.activeMarkets.values()).filter(m => m.status === 'ACTIVE').length;
+        if (!this.cooldownUntil) {
+            if (activeCount === 0 || (activeCount === 1 && minTimeLeft < 60)) {
+                await this.findAndJoinMarket();
+            }
         }
 
         // Log Status
@@ -184,9 +204,9 @@ export class SimpleHedgeStrategy implements Strategy {
             try {
                 const order = await this.clobClient.getOrder(state.yesOrderId);
                 // @ts-ignore
-                if (order && (order.status === "MATCHED" || parseFloat(order.size_matched) >= this.calcSize())) {
+                if (order && (order.status === "MATCHED" || order.status === "FILLED" || parseFloat(order.size_matched) >= state.targetShares)) {
                     state.yesFilled = true;
-                    console.log(`[SimpleHedge] ✅ YES Filled for ${state.slug}`);
+                    console.log(`[Btc5mHedge] ✅ YES Filled for ${state.slug}`);
                 }
             } catch (e) { /* ignore 404 or errors */ }
         }
@@ -196,16 +216,16 @@ export class SimpleHedgeStrategy implements Strategy {
             try {
                 const order = await this.clobClient.getOrder(state.noOrderId);
                 // @ts-ignore
-                if (order && (order.status === "MATCHED" || parseFloat(order.size_matched) >= this.calcSize())) {
+                if (order && (order.status === "MATCHED" || order.status === "FILLED" || parseFloat(order.size_matched) >= state.targetShares)) {
                     state.noFilled = true;
-                    console.log(`[SimpleHedge] ✅ NO Filled for ${state.slug}`);
+                    console.log(`[Btc5mHedge] ✅ NO Filled for ${state.slug}`);
                 }
             } catch (e) { }
         }
     }
 
     private async handleMarketExpiry(state: MarketState) {
-        console.log(`[SimpleHedge] 🏁 Market Expired: ${state.slug}`);
+        console.log(`[Btc5mHedge] 🏁 Market Expired: ${state.slug}`);
 
         // 1. Cancel Open Orders
         if (state.yesOrderId && !state.yesFilled) await this.cancelOrder(state.yesOrderId);
@@ -251,8 +271,8 @@ export class SimpleHedgeStrategy implements Strategy {
             this.stats.neutral++;
         }
 
-        console.log(`[SimpleHedge] Result for ${state.slug}: ${outcome}`);
-        console.log(`[SimpleHedge] Fills: YES=${state.yesFilled} NO=${state.noFilled} | Res=${resolution}`);
+        console.log(`[Btc5mHedge] Result for ${state.slug}: ${outcome}`);
+        console.log(`[Btc5mHedge] Fills: YES=${state.yesFilled} NO=${state.noFilled} | Res=${resolution}`);
 
         // 3. AUTO-REDEEM
         console.log(color("🔄 Auto-Redeeming winnings...", COLORS.CYAN));
@@ -265,14 +285,16 @@ export class SimpleHedgeStrategy implements Strategy {
 
         // Trigger Cooldown?
         if (this.consecutiveFailures >= 2) {
-            console.warn(`[SimpleHedge] ⚠️ ${this.consecutiveFailures} Consecutive Hedge Failures (Partial Fills). Triggering ${(this.COOLDOWN_MS / 60000).toFixed(1)}m Cooldown.`);
+            console.warn(`[Btc5mHedge] ⚠️ ${this.consecutiveFailures} Consecutive Hedge Failures (Partial Fills). Triggering ${(this.COOLDOWN_MS / 60000).toFixed(1)}m Cooldown.`);
             this.cooldownUntil = Date.now() + this.COOLDOWN_MS;
         }
     }
 
     // [FIXED] findAndJoinMarket
     private async findAndJoinMarket() {
-        if (this.activeMarkets.size >= this.MAX_CONCURRENT || this.cooldownUntil) return;
+        if (this.cooldownUntil) return;
+        const activeCount = Array.from(this.activeMarkets.values()).filter(m => m.status === 'ACTIVE').length;
+        if (activeCount >= this.MAX_CONCURRENT + 1) return; // Allow 1 active + 1 pre-warm
 
         // Find next 5m market
         const nowSec = Date.now() / 1000;
@@ -280,17 +302,12 @@ export class SimpleHedgeStrategy implements Strategy {
         const currentSlot = Math.floor(nowSec / interval) * interval;
 
         // Check slots 0 (current), 1 (next), 2 (future)
-        // STRICT RULE: Only join ONE valid market.
         for (let i = 0; i < 3; i++) {
             const startTimestamp = currentSlot + (i * interval);
             const expectedSlug = `${this.COIN.toLowerCase()}-updown-5m-${startTimestamp}`;
 
-            // Uniqueness check
-            let alreadyActive = false;
-            for (const m of this.activeMarkets.values()) {
-                if (m.slug === expectedSlug) alreadyActive = true;
-            }
-            if (alreadyActive) continue;
+            // Uniqueness check (don't join if already active or expired in memory)
+            if (Array.from(this.activeMarkets.values()).some(m => m.slug === expectedSlug)) continue;
 
             // Fetch
             try {
@@ -301,7 +318,7 @@ export class SimpleHedgeStrategy implements Strategy {
 
                     // [FIX] Strict Slug Match (Avoid fuzzy 15m matches)
                     if (m.slug !== expectedSlug) {
-                        // console.log(`[SimpleHedge] Skip mismatch: ${m.slug} != ${expectedSlug}`);
+                        // console.log(`[Btc5mHedge] Skip mismatch: ${m.slug} != ${expectedSlug}`);
                         continue;
                     }
 
@@ -318,7 +335,7 @@ export class SimpleHedgeStrategy implements Strategy {
                     if (timeLeftMs < 270000) { // 4m 30s = 270s
                         // Only log if it's kinda close (e.g. > 30s left), and we haven't found a better candidate
                         if (timeLeftMs > 30000 && i === 0) {
-                            console.log(`[SimpleHedge] Skipping ${m.slug} (${(timeLeftMs / 1000).toFixed(0)}s left). Too late to join (< 270s).`);
+                            console.log(`[Btc5mHedge] Skipping ${m.slug} (${(timeLeftMs / 1000).toFixed(0)}s left). Too late to join (< 270s).`);
                         }
                         continue; // Check next slot
                     }
@@ -336,7 +353,7 @@ export class SimpleHedgeStrategy implements Strategy {
     }
 
     private async joinMarket(market: any, startTime: number, endTime: number) {
-        console.log(`[SimpleHedge] Joining Market: ${market.slug}`);
+        console.log(`[Btc5mHedge] Joining Market: ${market.slug}`);
 
         let tokenIds: string[] = [];
         try {
@@ -355,7 +372,10 @@ export class SimpleHedgeStrategy implements Strategy {
             noFilled: false,
             ordersPlaced: false,
             startTime,
-            prices: new Map()
+            prices: new Map(),
+            status: 'ACTIVE',
+            targetShares: 0, // Placeholder, calculated below
+            roundPrice: 0    // Placeholder, calculated below
         };
 
         // [FIX] Register IMMEDIATELY to prevent double-join race condition
@@ -378,61 +398,99 @@ export class SimpleHedgeStrategy implements Strategy {
                 if (mid1 && mid1.mid) state.prices.set(tokenIds[0], parseFloat(mid1.mid));
                 if (mid2 && mid2.mid) state.prices.set(tokenIds[1], parseFloat(mid2.mid));
 
-                console.log(`[SimpleHedge] Seeded Prices: ${mid1?.mid || '?'} / ${mid2?.mid || '?'}`);
+                console.log(`[Btc5mHedge] Seeded Prices: ${mid1?.mid || '?'} / ${mid2?.mid || '?'}`);
             } catch (e) {
-                console.warn(`[SimpleHedge] Failed to fetch initial midpoints: ${e}`);
+                console.warn(`[Btc5mHedge] Failed to fetch initial midpoints: ${e}`);
             }
         }
 
         // Generate Random Price for this round
-        this.currentRoundPrice = this.minPrice + Math.random() * (this.maxPrice - this.minPrice);
-        // Round to 1 tick (0.01)? Or allow decimals? Gamma allows specific, CLOB might reject.
-        // Assuming 2 decimals for Polymarket (cents).
-        this.currentRoundPrice = Math.floor(this.currentRoundPrice * 100) / 100;
+        let roundPrice = this.minPrice + Math.random() * (this.maxPrice - this.minPrice);
+        state.roundPrice = Math.floor(roundPrice * 100) / 100;
+        
+        // Calculate Size for this specific market
+        state.targetShares = this.calcSizeForPrice(state.roundPrice);
 
         // PLACE ORDERS IMMEDIATELY
         await this.placeDualOrders(state);
     }
 
+    private calcSizeForPrice(price: number): number {
+        if (this.tradeShares > 0) return this.tradeShares;
+        return Math.floor(this.tradeSizeUsd / price);
+    }
+
     private calcSize(): number {
-        // Size = USD / Price
-        return Math.floor(this.tradeSizeUsd / this.currentRoundPrice);
+        // [DEPRECATED] use calcSizeForPrice
+        return this.tradeShares > 0 ? this.tradeShares : 0;
+    }
+
+    private async getEffectiveBalance(): Promise<number> {
+        if (!this.clobClient) return 0;
+        try {
+            // [FIX] Use standard getBalanceAllowance with AssetType.COLLATERAL
+            const res = await this.clobClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+            return parseFloat((res as any).balance || "0") / 1e6; // USDC.e has 6 decimals
+        } catch (e) {
+            console.error(`[Btc5mHedge] Failed to fetch balance: ${e}`);
+            return 0;
+        }
     }
 
     private async placeDualOrders(state: MarketState) {
         if (!this.clobClient) return;
 
-        const size = this.calcSize();
-        console.log(`[SimpleHedge] Posting Liquidity: Buy YES/NO @ ${this.currentRoundPrice.toFixed(2)} (Size: ${size}) for ${state.slug}`);
+        let size = state.targetShares;
+        const price = state.roundPrice;
+        const requiredUsd = size * price;
+
+        // [FIX] Pre-flight balance check and auto-scale
+        const balance = await this.getEffectiveBalance();
+        if (requiredUsd > balance) {
+            console.warn(color(`[Btc5mHedge] ⚠️ Insufficient Balance ($${balance.toFixed(2)}) for order ($${requiredUsd.toFixed(2)})`, COLORS.YELLOW));
+            
+            // Auto-scale down to 95% of available balance to leave room for fees
+            const safeUsd = balance * 0.95;
+            size = Math.floor(safeUsd / price);
+
+            if (size <= 0) {
+                console.error(color(`[Btc5mHedge] ❌ Balance too low to place any order ($${balance.toFixed(2)})`, COLORS.RED));
+                return;
+            }
+            console.log(color(`[Btc5mHedge] 🔄 Scaling down order size from ${state.targetShares} to ${size} shares.`, COLORS.CYAN));
+            state.targetShares = size; // Update stored target
+        }
+
+        console.log(`[Btc5mHedge] Posting Liquidity: Buy YES/NO @ ${price.toFixed(2)} (Size: ${size}) for ${state.slug}`);
 
         // YES Order
         try {
             const yesOrder = await this.clobClient.createAndPostOrder({
                 tokenID: state.tokenIds[0],
-                price: this.currentRoundPrice,
+                price: state.roundPrice,
                 side: Side.BUY,
                 size: size
-            });
+            }, { tickSize: "0.01" });
             if (yesOrder && yesOrder.orderID) {
                 state.yesOrderId = yesOrder.orderID;
             }
         } catch (e: any) {
-            console.error(`[SimpleHedge] Failed to post YES: ${e.message}`);
+            console.error(`[Btc5mHedge] Failed to post YES: ${e.message}`);
         }
 
         // NO Order
         try {
             const noOrder = await this.clobClient.createAndPostOrder({
                 tokenID: state.tokenIds[1],
-                price: this.currentRoundPrice,
+                price: state.roundPrice,
                 side: Side.BUY,
                 size: size
-            });
+            }, { tickSize: "0.01" });
             if (noOrder && noOrder.orderID) {
                 state.noOrderId = noOrder.orderID;
             }
         } catch (e: any) {
-            console.error(`[SimpleHedge] Failed to post NO: ${e.message}`);
+            console.error(`[Btc5mHedge] Failed to post NO: ${e.message}`);
         }
 
         state.ordersPlaced = true;
@@ -442,7 +500,7 @@ export class SimpleHedgeStrategy implements Strategy {
         if (!this.clobClient) return;
         try {
             await this.clobClient.cancelOrder({ orderID: orderId });
-            console.log(`[SimpleHedge] Cancelled Order ${orderId}`);
+            console.log(`[Btc5mHedge] Cancelled Order ${orderId}`);
         } catch (e) { /* ignore already cancelled/filled */ }
     }
 
@@ -455,6 +513,10 @@ export class SimpleHedgeStrategy implements Strategy {
         for (const state of this.activeMarkets.values()) {
             if (state.tokenIds.includes(tokenId)) {
                 state.prices.set(tokenId, currentPrice);
+                
+                // [NEW] Log structured data
+                const isYes = tokenId === state.tokenIds[0];
+                PriceLogger.log(state.slug, tokenId, isYes ? 'YES' : 'NO', currentPrice);
                 break;
             }
         }
@@ -463,7 +525,7 @@ export class SimpleHedgeStrategy implements Strategy {
     private logStatus() {
         if (this.activeMarkets.size === 0) {
             if (this.consecutiveFailures > 0) {
-                console.log(`[SimpleHedge] Idle. FailStreak: ${this.consecutiveFailures}`);
+                console.log(`[Btc5mHedge] Idle. FailStreak: ${this.consecutiveFailures}`);
             }
             return;
         }
@@ -506,7 +568,7 @@ export class SimpleHedgeStrategy implements Strategy {
         this.destroyed = true;
         if (this.loopInterval) clearInterval(this.loopInterval);
         if (this.priceSocket) this.priceSocket.close();
-        console.log(`[SimpleHedge] Cleanup: Cancelling all active orders...`);
+        console.log(`[Btc5mHedge] Cleanup: Cancelling all active orders...`);
         for (const state of this.activeMarkets.values()) {
             await this.handleMarketExpiry(state);
         }

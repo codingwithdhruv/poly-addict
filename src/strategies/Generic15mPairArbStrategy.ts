@@ -1,10 +1,10 @@
 import { Strategy } from "./types.js";
 import { ClobClient, Side, AssetType } from "@polymarket/clob-client";
-import { RelayClient } from "@polymarket/builder-relayer-client";
 import { PriceSocket, PriceUpdate } from "../clients/websocket.js";
 import { GammaClient } from "../clients/gamma-api.js";
 import { PnlManager } from "../lib/pnlManager.js";
 import { WalletGuard } from "../lib/walletGuard.js";
+import { PriceLogger } from "../lib/priceLogger.js";
 
 // --- UI / ANSI Helpers ---
 const COLORS = {
@@ -27,7 +27,7 @@ function color(text: string, colorCode: string): string {
 }
 
 // ================= CONFIG =================
-export interface TrueArbConfig {
+export interface PairArbConfig {
     coin: string;
     maxRiskPct: number;        // % of wallet per arb
     maxPairCost: number;       // e.g. 0.97
@@ -37,13 +37,13 @@ export interface TrueArbConfig {
 }
 
 // ================= STRATEGY =================
-export class TruePairArbStrategy implements Strategy {
-    name = "TRUE PAIR ARBITRAGE";
+export class Generic15mPairArbStrategy implements Strategy {
+    name = "Generic 15m Pair Arbitrage Strategy";
     private clob?: ClobClient;
     private gamma = new GammaClient();
     private socket: PriceSocket;
     private pnl = new PnlManager();
-    private cfg: TrueArbConfig;
+    private cfg: PairArbConfig;
     private prices = new Map<string, number>();
     private tokenIds: string[] = [];
     private executing = false;
@@ -56,7 +56,7 @@ export class TruePairArbStrategy implements Strategy {
     private statusInterval?: NodeJS.Timeout;
     private active = false;
 
-    constructor(cfg: Partial<TrueArbConfig> = {}) {
+    constructor(cfg: Partial<PairArbConfig> = {}) {
         this.cfg = {
             coin: cfg.coin || "BTC",
             maxRiskPct: cfg.maxRiskPct ?? 0.05,
@@ -68,7 +68,7 @@ export class TruePairArbStrategy implements Strategy {
         this.socket = new PriceSocket(this.onPrice.bind(this));
     }
 
-    async init(clob: ClobClient, _relay: RelayClient) {
+    async init(clob: ClobClient) {
         this.clob = clob;
         const bal = await clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
         const usd = parseFloat((bal as any).balance) / 1e6;
@@ -78,7 +78,7 @@ export class TruePairArbStrategy implements Strategy {
 
     // ================= MARKET =================
     private async selectMarket(): Promise<void> {
-        console.log(`[TrueArb] Scanning for ${this.cfg.coin} 15m markets...`);
+        console.log(`[PairArb] Scanning for ${this.cfg.coin} 15m markets...`);
 
         // 1. Generate potential slugs for the next 2 hours
         const duration = '15m';
@@ -119,7 +119,7 @@ export class TruePairArbStrategy implements Strategy {
         }
 
         if (!targetMarket) {
-            console.log("[TrueArb] No active markets found. Retrying in 5s...");
+            console.log("[PairArb] No active markets found. Retrying in 5s...");
             await new Promise(r => setTimeout(r, 5000));
             return this.selectMarket(); // Retry recursion
         }
@@ -133,8 +133,8 @@ export class TruePairArbStrategy implements Strategy {
         this.marketEndTime = new Date(endTimeStr).getTime();
 
         this.socket.connect(this.tokenIds);
-        console.log(`[TrueArb] Connected to ${targetMarket.slug}`);
-        console.log(color(`[TrueArb] Question: ${targetMarket.question}`, COLORS.CYAN));
+        console.log(`[PairArb] Connected to ${targetMarket.slug}`);
+        console.log(color(`[PairArb] Question: ${targetMarket.question}`, COLORS.CYAN));
 
         // Start Status Loop
         this.startStatusLoop();
@@ -142,7 +142,16 @@ export class TruePairArbStrategy implements Strategy {
 
     // ================= PRICE HANDLER =================
     private onPrice(update: PriceUpdate) {
-        this.prices.set(update.asset_id, parseFloat(update.price));
+        const tokenId = update.asset_id;
+        const price = parseFloat(update.price);
+        this.prices.set(tokenId, price);
+        
+        // [NEW] Log structured data
+        if (this.marketSlug) {
+            const isYes = tokenId === this.tokenIds[0];
+            PriceLogger.log(this.marketSlug, tokenId, isYes ? 'YES' : 'NO', price);
+        }
+
         if (this.prices.size === 2) this.tryArb();
     }
 
@@ -174,7 +183,7 @@ export class TruePairArbStrategy implements Strategy {
         if (shares < this.cfg.minLiquidityShares) return;
 
         const cost = shares * pairCost;
-        if (!WalletGuard.tryReserve(cost, walletUsd)) return;
+        if (!WalletGuard.tryReserve(this.name, cost, walletUsd)) return;
 
         this.executing = true;
         try {
@@ -203,7 +212,7 @@ export class TruePairArbStrategy implements Strategy {
         } catch (e) {
             console.error("❌ ARB FAILED — ABORTING");
             // Since we failed, we release the reserved funds
-            WalletGuard.release(cost);
+            WalletGuard.release(this.name, cost);
         } finally {
             this.executing = false;
         }

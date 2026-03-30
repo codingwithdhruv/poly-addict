@@ -1,4 +1,4 @@
-import { DipArbConfig } from "../strategies/dipArb.js";
+import { DipArbConfig } from "../strategies/Generic15mDipArbStrategy.js";
 
 export type SideInput = 'YES' | 'NO' | 'BOTH';
 
@@ -198,6 +198,7 @@ export function parseCliArgs(): DipArbConfig {
     // 4. Construct Final Config
     return {
         coin,
+        duration: '15m',
         dipThreshold: getArgValue('dip', defaults.dipThreshold!),
         slidingWindowMs: getArgValue('window', defaults.slidingWindowMs!),
         leg2TimeoutSeconds: getArgValue('timeout', defaults.leg2TimeoutSeconds!),

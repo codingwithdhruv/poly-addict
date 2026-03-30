@@ -1,14 +1,13 @@
 import { ethers } from "ethers";
 import { createClobClient } from "./clients/clob.js";
-import { createRelayClient } from "./clients/relay.js";
 import { parseCliArgs } from "./config/args.js";
-import { DipArbStrategy, DipArbConfig } from "./strategies/dipArb.js";
-import { Btc5mStrategy } from "./strategies/Btc5mStrategy.js";
-import { TruePairArbStrategy } from "./strategies/TruePairArbStrategy.js";
+import { Generic15mDipArbStrategy, DipArbConfig } from "./strategies/Generic15mDipArbStrategy.js";
+import { Btc5mVolatilityStrategy } from "./strategies/Btc5mVolatilityStrategy.js";
+import { Generic15mPairArbStrategy } from "./strategies/Generic15mPairArbStrategy.js";
 import { Bot, BotConfig } from "./bot.js";
 import { PnlManager } from "./lib/pnlManager.js"; // Import PnlManager
-import { SimpleHedgeStrategy } from "./strategies/SimpleHedgeStrategy.js";
-import { UsaSessionStrategy } from "./strategies/UsaSessionStrategy.js";
+import { Btc5mFixedHedgeStrategy } from "./strategies/Btc5mFixedHedgeStrategy.js";
+import { Btc15mExtremeMeanReversionStrategy } from "./strategies/Btc15mExtremeMeanReversionStrategy.js";
 import { redeemPositions } from "./scripts/redeem.js";
 
 // --- UI Helpers for Dashboard ---
@@ -122,9 +121,7 @@ async function main() {
     console.log("Initializing local wallet and relay client...");
     // const wallet = new ethers.Wallet(privateKey); // Not needed here if clients handle it
     // const chainId = 137; // Polygon
-    const relayClient = createRelayClient();
-
-    console.log("Initializing CLOB client...");
+        console.log("Initializing CLOB client...");
     const clobClient = await createClobClient();
 
     // 3. Strategy
@@ -132,19 +129,19 @@ async function main() {
     let strategy;
 
     if (args.strategy === 'true-arb') {
-        strategy = new TruePairArbStrategy({
+        strategy = new Generic15mPairArbStrategy({
             coin: args.coin,
             maxRiskPct: 0.05, // Default safe configs or map from args if needed
             // Map relevant args or rely on strategy defaults
         });
     } else if (args.strategy === 'btc5m') {
-        strategy = new Btc5mStrategy(args);
+        strategy = new Btc5mVolatilityStrategy(args);
     } else if (args.strategy === 'simple-hedge') {
-        strategy = new SimpleHedgeStrategy(args);
+        strategy = new Btc5mFixedHedgeStrategy(args);
     } else if (args.strategy === 'usa-session') {
-        strategy = new UsaSessionStrategy(args);
+        strategy = new Btc15mExtremeMeanReversionStrategy(args);
     } else {
-        strategy = new DipArbStrategy(args);
+        strategy = new Generic15mDipArbStrategy(args);
     }
 
     // 4. Bot
@@ -159,7 +156,7 @@ async function main() {
         return;
     }
 
-    const bot = new Bot(clobClient, relayClient, strategy, config);
+    const bot = new Bot(clobClient, strategy, config);
     await bot.start();
 }
 

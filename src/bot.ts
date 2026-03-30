@@ -1,5 +1,4 @@
 import { ClobClient } from "@polymarket/clob-client";
-import { RelayClient } from "@polymarket/builder-relayer-client";
 import { Strategy } from "./strategies/types.js";
 
 export interface BotConfig {
@@ -9,14 +8,12 @@ export interface BotConfig {
 
 export class Bot {
     private clobClient: ClobClient;
-    private relayClient: RelayClient;
-    private strategy: Strategy;
+        private strategy: Strategy;
     private config: BotConfig;
 
-    constructor(clobClient: ClobClient, relayClient: RelayClient, strategy: Strategy, config: BotConfig) {
+    constructor(clobClient: ClobClient, strategy: Strategy, config: BotConfig) {
         this.clobClient = clobClient;
-        this.relayClient = relayClient;
-        this.strategy = strategy;
+                this.strategy = strategy;
         this.config = config;
     }
 
@@ -30,7 +27,7 @@ export class Bot {
             // But DipArbStrategy.init(clob, relay) expects them.
 
             console.log("Initializing strategy...");
-            await this.strategy.init(this.clobClient, this.relayClient);
+            await this.strategy.init(this.clobClient);
 
             console.log("Running strategy...");
             await this.strategy.run();
