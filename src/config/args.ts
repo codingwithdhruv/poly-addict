@@ -234,6 +234,8 @@ export function parseCliArgs(): DipArbConfig {
         // Strategy Selection
         strategy: (args.includes('--arb') || args.includes('-arb')) ? 'true-arb' :
             (args.includes('--btc5m') || args.find(a => a.startsWith('--strategy=btc5m'))) ? 'btc5m' :
+                (args.includes('--wick-drift') || args.find(a => a.startsWith('--strategy=wick-drift'))) ? 'wick-drift' :
+                (args.includes('--dynamic-hedge') || args.find(a => a.startsWith('--strategy=dynamic-hedge'))) ? 'dynamic-hedge' :
                 (args.includes('--simple-hedge') || args.find(a => a.startsWith('--strategy=simple-hedge'))) ? 'simple-hedge' :
                     (args.includes('--usa-session') || args.includes('--mean-reversion') ||
                         args.some((a, i) => (a === '--strategy' && (args[i + 1] === 'usa-session' || args[i + 1] === 'mean-reversion')))) ? 'usa-session' : 'dip',

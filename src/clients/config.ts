@@ -90,3 +90,21 @@ export const CONFIG = {
 export const isProxyEnabled = (): boolean => {
     return !!CONFIG.POLY_PROXY_ADDRESS;
 }
+
+// --- Ethers Helpers for Dashboard ---
+import { ethers } from "ethers";
+
+let providerInstance: ethers.providers.JsonRpcProvider | null = null;
+
+export const getRpcProvider = () => {
+    if (!providerInstance) {
+        providerInstance = new ethers.providers.JsonRpcProvider(CONFIG.RPC_URLS[0]);
+    }
+    return providerInstance;
+};
+
+export const getUsdcContract = () => {
+    const usdcAddr = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // Polygon USDC.e
+    const abi = ["function balanceOf(address) view returns (uint256)"];
+    return new ethers.Contract(usdcAddr, abi, getRpcProvider());
+};

@@ -7,6 +7,8 @@ import { Generic15mPairArbStrategy } from "./strategies/Generic15mPairArbStrateg
 import { Bot, BotConfig } from "./bot.js";
 import { PnlManager } from "./lib/pnlManager.js"; // Import PnlManager
 import { Btc5mFixedHedgeStrategy } from "./strategies/Btc5mFixedHedgeStrategy.js";
+import { Btc5mDynamicHedgeStrategy } from "./strategies/Btc5mDynamicHedgeStrategy.js";
+import { Btc5mWickDriftStrategy } from "./strategies/Btc5mWickDriftStrategy.js";
 import { Btc15mExtremeMeanReversionStrategy } from "./strategies/Btc15mExtremeMeanReversionStrategy.js";
 import { redeemPositions } from "./scripts/redeem.js";
 
@@ -38,18 +40,78 @@ async function main() {
         console.log("Starting Standalone PnL Dashboard...");
         const pnlManager = new PnlManager();
 
+        // [NEW] Background Balance Sync for Dashboard
+        const syncBalance = async () => {
+            try {
+                // Ethers setup
+                const { getUsdcContract, CONFIG, isProxyEnabled } = await import("./clients/config.js");
+                const usdc = getUsdcContract();
+                const provider = usdc.provider;
+                
+                // 1. EOA Balance
+                let eoaAddr = "";
+                let eoaBal = 0;
+                try {
+                    const wallet = new ethers.Wallet(CONFIG.PRIVATE_KEY);
+                    eoaAddr = wallet.address;
+                    const res = await usdc.balanceOf(eoaAddr);
+                    eoaBal = parseFloat(ethers.utils.formatUnits(res, 6));
+                } catch(e){}
+
+                // 2. Proxy Balance
+                let proxyBal = 0;
+                let proxyAddr = CONFIG.POLY_PROXY_ADDRESS;
+                if (isProxyEnabled() && proxyAddr) {
+                    try {
+                        const res = await usdc.balanceOf(proxyAddr);
+                        proxyBal = parseFloat(ethers.utils.formatUnits(res, 6));
+                    } catch(e){}
+                }
+
+                // 3. Open Positions
+                let openPos = 0;
+                try {
+                    const targetAddr = proxyAddr || eoaAddr;
+                    if (targetAddr) {
+                        const req = await fetch(`https://data-api.polymarket.com/positions?user=${targetAddr}&limit=100`);
+                        const data = await req.json();
+                        if (Array.isArray(data)) {
+                            for (const pos of data) {
+                                const size = parseFloat(pos.size);
+                                const price = parseFloat(pos.currentValue || pos.initialValue || "0") / size; // currentValue is total, so we just add it
+                                if (pos.currentValue !== undefined) {
+                                    openPos += parseFloat(pos.currentValue);
+                                } else {
+                                    openPos += size * price; 
+                                }
+                            }
+                        }
+                    }
+                } catch(e){}
+
+                pnlManager.updateDashboardWallets(eoaBal, proxyBal, openPos);
+            } catch (e) {}
+        };
+        syncBalance(); // Initial
+        setInterval(syncBalance, 30000); // Every 30s
+
         setInterval(() => {
             console.clear();
             const allStats = pnlManager.getAllStats();
-            const coins = ['BTC', 'ETH', 'XRP'];
+            const coins = ['BTC', 'ETH', 'XRP', 'SOL'];
 
             console.log(color(`\n══════════════════════════════════════════════════════════`, COLORS.DIM));
-            console.log(color(`📊 POLYMARKET DIP ARB DASHBOARD (LIVE)`, COLORS.BRIGHT + COLORS.CYAN));
+            console.log(color(`📊 POLY-ADDICT TRADING HUD (LIVE)`, COLORS.BRIGHT + COLORS.CYAN));
             console.log(color(`══════════════════════════════════════════════════════════`, COLORS.DIM));
 
             // Wallet
             console.log(`Wallet:`);
-            console.log(`  Balance:        $${allStats.walletBalance.toFixed(2)}`);
+            console.log(`  EOA (Gas):       $${allStats.eoaBalance.toFixed(2)}`);
+            if (allStats.proxyBalance > 0 || allStats.eoaBalance === 0) {
+                console.log(`  Proxy (Trading): $${allStats.proxyBalance.toFixed(2)}`);
+            }
+            console.log(`  Open Positions:  $${allStats.openPositionValue.toFixed(2)}`);
+            
             let totalPnL = 0;
             Object.values(allStats.coins).forEach(c => totalPnL += c.realizedPnL);
             const pnlColor = totalPnL >= 0 ? COLORS.GREEN : COLORS.RED;
@@ -91,7 +153,9 @@ async function main() {
                 console.log(color("  No active cycles.", COLORS.DIM));
             } else {
                 Object.values(allStats.activeCycles).forEach(c => {
-                    console.log(`  • ${c.coin} ${c.id.split('-').slice(-4).join('-')} [Exp: $${(c.yesCost + c.noCost).toFixed(2)}]`);
+                    const idParts = (c.id || "market").split('-');
+                    const shortId = idParts.length > 2 ? idParts.slice(-4).join('-') : c.id;
+                    console.log(`  • ${c.coin} ${shortId} [Exp: $${(c.yesCost + c.noCost).toFixed(2)}]`);
                 });
             }
 
@@ -136,6 +200,10 @@ async function main() {
         });
     } else if (args.strategy === 'btc5m') {
         strategy = new Btc5mVolatilityStrategy(args);
+    } else if (args.strategy === 'wick-drift') {
+        strategy = new Btc5mWickDriftStrategy(args);
+    } else if (args.strategy === 'dynamic-hedge') {
+        strategy = new Btc5mDynamicHedgeStrategy(args);
     } else if (args.strategy === 'simple-hedge') {
         strategy = new Btc5mFixedHedgeStrategy(args);
     } else if (args.strategy === 'usa-session') {

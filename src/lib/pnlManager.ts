@@ -38,7 +38,13 @@ export type PnlReason = 'WIN' | 'LOSS' | 'ABANDON' | 'EARLY_EXIT' | 'LATE_EXIT' 
 interface GlobalState {
     coins: Record<string, CoinPnL>;
     activeCycles: Record<string, CycleStats>; // marketId -> stats
-    walletBalance: number; // Last seen wallet balance
+    
+    // Dashboard Wallet Tracking
+    eoaBalance: number;
+    proxyBalance: number;
+    openPositionValue: number;
+    
+    walletBalance: number; // [Deprecated] Legacy single-balance
     startingBalance: number; // Session start balance (or first see)
     maxEquity: number; // High-water mark for equity (Wallet + OpenRisk)
     lastUpdate: number;
@@ -54,21 +60,27 @@ export class PnlManager {
     }
 
     private load(): GlobalState {
-        try {
-            if (fs.existsSync(DB_PATH)) {
-                return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
-            }
-        } catch (e) {
-            console.error("Failed to load PnL DB, resetting:", e);
-        }
-        return {
+        const defaultState: GlobalState = {
             coins: {},
             activeCycles: {},
+            eoaBalance: 0,
+            proxyBalance: 0,
+            openPositionValue: 0,
             walletBalance: 0,
             startingBalance: 0,
             maxEquity: 0,
             lastUpdate: Date.now()
         };
+
+        try {
+            if (fs.existsSync(DB_PATH)) {
+                const parsed = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+                return { ...defaultState, ...parsed };
+            }
+        } catch (e) {
+            console.error("Failed to load PnL DB, resetting:", e);
+        }
+        return defaultState;
     }
 
     private save() {
@@ -89,20 +101,15 @@ export class PnlManager {
     public updateWalletBalance(bal: number) {
         this.sync();
         this.state.walletBalance = bal;
-        if (this.state.startingBalance === 0 && bal > 0) {
-            this.state.startingBalance = bal;
-        }
+        this.save();
+    }
 
-        // [FIX DRAWDOWN] Track High-Water Mark Equity
-        // Equity = Wallet + Current Exposure (Cost Basis Approx)
-        let totalExp = 0;
-        Object.values(this.state.activeCycles).forEach(c => totalExp += (c.yesCost + c.noCost));
-
-        const currentEquity = bal + totalExp;
-        if (this.state.maxEquity < currentEquity) {
-            this.state.maxEquity = currentEquity;
-        }
-
+    public updateDashboardWallets(eoa: number, proxy: number, openPos: number) {
+        this.sync();
+        this.state.eoaBalance = eoa;
+        this.state.proxyBalance = proxy;
+        this.state.openPositionValue = openPos;
+        this.state.walletBalance = proxy; // Fallback mapping for backwards compatibility
         this.save();
     }
 
@@ -122,9 +129,10 @@ export class PnlManager {
 
     public getCoinStats(coin: string): CoinPnL {
         this.sync(); // ensure freshness
-        if (!this.state.coins[coin]) {
-            this.state.coins[coin] = {
-                coin: coin as any,
+        const c = coin.toUpperCase();
+        if (!this.state.coins[c]) {
+            this.state.coins[c] = {
+                coin: c as any,
                 cyclesCompleted: 0,
                 cyclesWon: 0,
                 cyclesLost: 0,
@@ -136,7 +144,7 @@ export class PnlManager {
             };
             this.save();
         }
-        return this.state.coins[coin];
+        return this.state.coins[c];
     }
 
     public startCycle(coin: string, marketId: string, slug: string) {
