@@ -11,6 +11,11 @@ import { Btc5mDynamicHedgeStrategy } from "./strategies/Btc5mDynamicHedgeStrateg
 import { Btc5mWickDriftStrategy } from "./strategies/Btc5mWickDriftStrategy.js";
 import { Btc15mExtremeMeanReversionStrategy } from "./strategies/Btc15mExtremeMeanReversionStrategy.js";
 import { redeemPositions } from "./scripts/redeem.js";
+import dns from 'dns';
+
+// Fix Cloudflare IPv6 Network Unreachability / Timeouts globally
+// This forces Node to use IPv4 out of the box for REST and Sockets.
+dns.setDefaultResultOrder('ipv4first');
 
 // --- UI Helpers for Dashboard ---
 const COLORS = {

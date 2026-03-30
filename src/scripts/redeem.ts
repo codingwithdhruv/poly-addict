@@ -1,5 +1,9 @@
 import { CTFClient } from '../clients/ctf.js';
 import { CONFIG } from '../clients/config.js';
+import dns from 'dns';
+
+// Fix Cloudflare IPv6 Network Drops
+dns.setDefaultResultOrder('ipv4first');
 
 interface Position {
     conditionId: string;
@@ -70,13 +74,26 @@ export async function redeemPositions(options: { forceEOA?: boolean } = {}) {
 
         try {
             while (hasMore) {
-                const response = await fetch(
-                    `https://data-api.polymarket.com/positions?user=${userAddress}&limit=100&offset=${offset}` 
-                );
-                if (!response.ok) throw new Error(`Data API Error: ${response.statusText}`);
+                let success = false;
+                let retries = 0;
+                let data: any[] = [];
+                
+                while (!success && retries < 3) {
+                    try {
+                        const response = await fetch(
+                            `https://data-api.polymarket.com/positions?user=${userAddress}&limit=100&offset=${offset}` 
+                        );
+                        if (!response.ok) throw new Error(`Data API Error: ${response.statusText}`);
+                        data = await response.json() as any[];
+                        success = true;
+                    } catch (e: any) {
+                        retries++;
+                        if (retries >= 3) throw e;
+                        await new Promise(r => setTimeout(r, 1000 * retries));
+                    }
+                }
 
-                const data = await response.json() as any[];
-                if (Array.isArray(data) && data.length > 0) {
+                if (success && Array.isArray(data) && data.length > 0) {
                     positions.push(...data.map((p: any) => ({
                         conditionId: p.conditionId,
                         asset: p.asset,
