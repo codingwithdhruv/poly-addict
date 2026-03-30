@@ -43,7 +43,7 @@ export class PriceSocket {
     private respawnCounter = 0;
     private lastRespawnReset = Date.now();
 
-    constructor(onPrice: (update: PriceUpdate) => void, swarmSize: number = 50) {
+    constructor(onPrice: (update: PriceUpdate) => void, swarmSize: number = 10) {
         this.onPriceCallback = onPrice;
         this.swarmSize = swarmSize;
     }
@@ -57,16 +57,20 @@ export class PriceSocket {
 
         console.log(`[WS-SWARM] Spinning up ${this.swarmSize} WebSockets for ${assetIds.length} tokens...`);
 
-        // Stagger startup (10ms intervals)
+        // Stagger startup (100ms intervals to avoid Cloudflare rate limits)
         for (let i = 0; i < this.swarmSize; i++) {
             setTimeout(() => {
                 if (!this.isClosed) this.spawnWorker(false);
-            }, i * 10);
+            }, i * 100);
         }
 
         // Anti-Jitter Reaper (4s check)
         if (this.reaperInterval) clearInterval(this.reaperInterval);
         this.reaperInterval = setInterval(() => this.reaperTick(), 4000);
+    }
+
+    public isConnected(): boolean {
+        return this.swarm.size > 0 && !this.isClosed;
     }
 
     subscribe(assetIds: string[]) {
@@ -142,7 +146,12 @@ export class PriceSocket {
             }
         });
         
-        ws.on("error", () => { /* Silence */ });
+        ws.on("error", (err) => {
+            if (!this.isClosed) {
+                console.warn(`[WS-SWARM] Worker ${id} error: ${err.message}`);
+                // Worker will be cleaned up by 'close' event which usually follows error
+            }
+        });
     }
 
     private processTick(workerId: number, update: PriceUpdate, now: number) {

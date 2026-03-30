@@ -159,6 +159,13 @@ export class Btc5mWickDriftStrategy implements Strategy {
             if (state.ordersPlaced && state.status === 'ACTIVE') {
                 await this.checkFills(state);
             }
+
+            // [NEW] Delayed WebSocket Connection Trigger (1 min before start)
+            const msToStart = state.startTime - now;
+            if (msToStart > 0 && msToStart < 60000 && !this.priceSocket?.isConnected()) {
+                console.log(color(`[WickDrift] ⚡ Market starting in ${Math.round(msToStart/1000)}s. Connecting WebSocket Swarm...`, COLORS.CYAN));
+                this.priceSocket?.connect(state.tokenIds);
+            }
         }
 
         const activeCount = Array.from(this.activeMarkets.values()).filter(m => m.status === 'ACTIVE').length;
@@ -390,7 +397,16 @@ export class Btc5mWickDriftStrategy implements Strategy {
         };
 
         this.activeMarkets.set(m.id, state);
-        if (this.priceSocket) this.priceSocket.connect(tokenIds);
+        
+        // [NEW] Delayed connection logic: only connect if within 60s of start
+        const msToStart = start - Date.now();
+        if (this.priceSocket) {
+            if (msToStart < 60000) {
+                this.priceSocket.connect(tokenIds);
+            } else {
+                console.log(color(`[WickDrift] 💤 Market starts in ${Math.round(msToStart/1000)}s. WS connection deferred.`, COLORS.DIM + COLORS.WHITE));
+            }
+        }
 
         // SEED PRICES
         try {

@@ -81,7 +81,8 @@ export async function redeemPositions(options: { forceEOA?: boolean } = {}) {
                 while (!success && retries < 3) {
                     try {
                         const response = await fetch(
-                            `https://data-api.polymarket.com/positions?user=${userAddress}&limit=100&offset=${offset}` 
+                            `https://data-api.polymarket.com/positions?user=${userAddress}&limit=100&offset=${offset}`,
+                            { signal: (AbortSignal as any).timeout(10000) }
                         );
                         if (!response.ok) throw new Error(`Data API Error: ${response.statusText}`);
                         data = await response.json() as any[];

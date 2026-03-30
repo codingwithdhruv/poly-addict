@@ -19,7 +19,7 @@ export class GammaClient {
     async getEvents(queryParams: string): Promise<GammaEvent[]> {
         const url = `${GAMMA_API_URL}/events?${queryParams}`;
         console.log(`Fetching Gamma Events: ${url}`);
-        const response = await fetch(url);
+        const response = await fetch(url, { signal: (AbortSignal as any).timeout(10000) });
         if (!response.ok) {
             throw new Error(`Gamma API Error: ${response.status} ${response.statusText}`);
         }
@@ -29,7 +29,7 @@ export class GammaClient {
     async getMarkets(queryParams: string): Promise<any[]> {
         const url = `${GAMMA_API_URL}/markets?${queryParams}`;
         console.log(`Fetching Gamma Markets: ${url}`);
-        const response = await fetch(url);
+        const response = await fetch(url, { signal: (AbortSignal as any).timeout(10000) });
         if (!response.ok) {
             // 404 is common if the predictive slug doesn't exist yet
             if (response.status === 404) return [];
