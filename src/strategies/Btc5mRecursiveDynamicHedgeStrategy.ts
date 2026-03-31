@@ -190,37 +190,71 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
     }
 
     private async manageHedge(state: MarketState, timeLeftSeconds: number) {
-        if (state.phase !== 'HEDGE' || !state.hedgeOrderId || !state.hedgeTargetPrice || !state.hedgeStartTs) return;
+        if (state.phase !== 'HEDGE' || !state.hedgeOrderId || !state.hedgeTargetPrice || !state.hedgeStartTs || state.targetShares <= 0) return;
         
         let relaxedPrice = state.hedgeTargetPrice;
-        
         const huntingSecs = Math.floor((Date.now() - state.hedgeStartTs) / 1000);
+        const tokenIdx = state.hedgeSide === 'YES' ? 0 : 1;
         
-        if (timeLeftSeconds < 20) {
-            relaxedPrice = 0.99; // Total emergency capitulation take
+        const currentAsk = state.prices.get(state.tokenIds[tokenIdx]) || 0.60;
+        
+        if (timeLeftSeconds < 30) {
+            relaxedPrice = Math.min(0.99, currentAsk + 0.05); // Dynamic panic slice
         } else if (huntingSecs >= 5) {
-            // Add +0.01 for every 5 seconds we sit idle, up to a max of 0.99
-            const increments = Math.floor(huntingSecs / 5);
+            const stepToMarket = Math.min(0.98, currentAsk + 0.01);
             let targetCost = (this.targetPairCost - state.roundPrice);
             if (targetCost < 0.01) targetCost = 0.01;
             
-            relaxedPrice = Math.min(0.99, (Math.floor(targetCost * 100) / 100) + (increments * 0.01));
+            const maxLinear = Math.min(0.95, (Math.floor(targetCost * 100) / 100) + (Math.floor(huntingSecs / 5) * 0.01));
+            
+            if (stepToMarket > maxLinear && stepToMarket < 0.95) {
+               relaxedPrice = stepToMarket;
+            } else {
+               relaxedPrice = maxLinear;
+            }
         }
 
         relaxedPrice = Math.floor(relaxedPrice * 100) / 100;
 
-        if (relaxedPrice > state.hedgeTargetPrice + 0.001) { // Floating point safety
-            if (timeLeftSeconds < 20) {
-                console.log(color(`[RecursiveDynamic] 🚨 EMERGENCY TAKER: < 20s left on ${state.slug}. Dumping at 0.99!`, COLORS.RED + COLORS.BRIGHT));
+        if (relaxedPrice > state.hedgeTargetPrice + 0.001) { 
+            try {
+                const orderStatus = await this.clobClient!.getOrder(state.hedgeOrderId);
+                if (orderStatus) {
+                    const matchedStr = (orderStatus as any).size_matched;
+                    const matchedFloat = parseFloat(matchedStr);
+                    if (!isNaN(matchedFloat) && matchedFloat > 0) {
+                        state.targetShares -= matchedFloat;
+                        state.targetShares = Math.max(0, state.targetShares);
+                        console.log(color(`[RecursiveDynamic] 🧩 PARTIAL FILL DETECTED: ${matchedFloat} shares secured! Remaining: ${state.targetShares}`, COLORS.GREEN));
+                    }
+                    
+                    if ((orderStatus as any).status === "MATCHED" || (orderStatus as any).status === "FILLED" || state.targetShares <= 0) {
+                         if (state.hedgeSide === 'YES') state.yesFilled = true;
+                         else state.noFilled = true;
+                         state.phase = 'HEDGED';
+                         console.log(color(`[RecursiveDynamic] 🛡️ HEDGE SECURED for ${state.slug} (Round ${state.roundNumber}) during sys sweep!`, COLORS.BRIGHT + COLORS.GREEN));
+                         const profit = (state.targetShares * (this.targetPairCost - state.roundPrice - (state.hedgeTargetPrice || 0)));
+                         this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'WIN', profit);
+                         this.stats.totalHedges++;
+                         this.stats.hedgeSuccess++;
+                         this.consecutiveFailures = 0;
+                         return;
+                    }
+                }
+            } catch(e) {}
+
+            if (state.targetShares <= 0) return;
+
+            if (timeLeftSeconds < 30) {
+                console.log(color(`[RecursiveDynamic] 🚨 EMERGENCY TAKER: < 30s left on ${state.slug}. Slicing at ${relaxedPrice}!`, COLORS.RED + COLORS.BRIGHT));
             } else {
-                console.log(color(`[RecursiveDynamic] ⏳ Chasing Hedge (${timeLeftSeconds.toFixed(0)}s left). Relaxing bid to ${relaxedPrice.toFixed(2)}`, COLORS.YELLOW));
+                console.log(color(`[RecursiveDynamic] ⏳ Chasing Hedge (${timeLeftSeconds.toFixed(0)}s left). Flexing bid to ${relaxedPrice.toFixed(2)}`, COLORS.YELLOW));
             }
             
             await this.cancelOrder(state.hedgeOrderId);
             state.hedgeTargetPrice = relaxedPrice;
             state.hedgeOrderId = undefined;
 
-            const tokenIdx = state.hedgeSide === 'YES' ? 0 : 1;
             try {
                 const hOrder = await this.clobClient!.createAndPostOrder({
                     tokenID: state.tokenIds[tokenIdx],
@@ -560,7 +594,21 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
     }
 
     private async placeDualOrders(state: MarketState) {
-        if (!this.clobClient) return;
+        if (!this.clobClient || state.status !== 'ACTIVE') return;
+
+        const yesPx = state.prices.get(state.tokenIds[0]);
+        const noPx = state.prices.get(state.tokenIds[1]);
+        
+        if (!yesPx || !noPx) {
+             setTimeout(() => { if (state.status === 'ACTIVE' && state.phase === 'LEG_IN') this.placeDualOrders(state).catch(()=>{}) }, 1000);
+             return;
+        }
+
+        if (Math.abs(yesPx - noPx) > 0.40) {
+             console.log(color(`[RecursiveDynamic] ⚠️ Momentum skew detected (${yesPx}/${noPx}). Stalling Leg-in placement for ${state.slug}...`, COLORS.YELLOW));
+             setTimeout(() => { if (state.status === 'ACTIVE' && state.phase === 'LEG_IN') this.placeDualOrders(state).catch(()=>{}) }, 5000);
+             return;
+        }
 
         let size = state.targetShares;
         const price = state.roundPrice;
