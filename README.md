@@ -2,7 +2,7 @@
 
 A "God-Tier" trading suite for Polymarket, optimized for low-latency market data, gasless transaction execution, and seamless autonomous multi-market rotation. 
 
-Built with a **WebSocket Swarm** (50+ connections) and **Relayer V2** integration for zero-gas maintenance, Poly-Addict acts as an unyielding liquidity provider and arbitrageur across Polymarket's ultra-short term (5m / 15m) markets.
+Built with a **WebSocket Swarm** and **Relayer V2** integration, Poly-Addict acts as an unyielding liquidity provider and arbitrageur across Polymarket's ultra-short term (5m / 15m) markets.
 
 ---
 
@@ -36,14 +36,14 @@ The fastest way to run the bot is using the included shell wrapper:
 ```bash
 chmod +x trade
 ./trade -dashboard           # Start the dual-balance portfolio tracker
-./trade btc --strategy reversion --tradeSizeUsd 2 # Run the 24/7 Noise Reversion Bot
+./trade btc --recursive-dynamic --shares 10 # Start the Flagship Hedge Bot
 ```
 
 ---
 
 ## 🐚 Master Shell Utility Guide
 
-The `./trade` command is the primary entrypoint for the suite, bypassing slow build checks and automating flag logic. 
+The `./trade` command is the primary entrypoint for the suite, automating flag logic. 
 
 **Core Syntax:**
 ```bash
@@ -51,90 +51,62 @@ The `./trade` command is the primary entrypoint for the suite, bypassing slow bu
 ```
 
 ### Universal Configuration Flags
-Regardless of which strategy you run, the following constraints and settings apply:
-
-| Flag | Description | Polymarket Rules |
+| Flag | Description | Default | 
 | :--- | :--- | :--- |
-| `--shares=<N>` | Fixed number of shares to buy per leg. | **Must be $\geq$ 5** (Polymarket CLOB Minimum constraint). |
-| `--tradeSizeUsd=<N>` | Dollar value (`USDC`) to allocate per leg. | Bot automatically floors size to 5 shares if this implies $< 5$. |
-| `--price=<C>` | Target entry price (in cents, e.g. `0.35` = $0.35). | Cannot exceed `1.00` (=$1.00). Used by sniper/hedge strategies. |
-| `--cooldown=<M>`| Minutes to wait if the bot fails consecutive hedges. | Default is `10` minutes. |
+| `--shares=<N>` | Fixed number of shares per leg (Polymarket min: 5). | 5 |
+| `--price=<C>` | Target entry price (e.g. `0.35` = $0.35). | 0.35 |
+| `--stop-loss=<S>` | Absolute sum limit (e.g. `1.15`). If YES+NO cost > S, exit. | 1.15 |
+| `--cooldown=<M>`| Minutes to wait after consecutive failures. | 10 |
 
 ---
 
 ## 🛠 Trading Strategy Reference Guides
 
-### 1. Noise Reversion (Market Maker) `[NEW & RECOMMENDED]`
-**Flag:** `--strategy reversion`
+### 1. Recursive Dynamic Hedge `[FLAGSHIP]`
+**Flag:** `--recursive-dynamic`
 **Timeframe:** 5M
-**Description:** The most advanced, profitable, and safest strategy. Calculates a dynamic 20-tick EMA for both YES and NO tokens. Floats Limit Buy orders at exactly `EMA - $0.12`. By acting strictly as a liquidity provider during micro-flash-crashes, it avoids all taker fees (Maker = $0 fees). Automatically places take-profit sell limit orders upon entry. Perfect for $30 portfolios.
-**Command (Minimum Values):**
+**Description:** The current state-of-the-art strategy. It bids passively at your target entry (e.g., 35c). Once one side fills, it immediately "Legs-In" to the opposite side to lock in a guaranteed profit spread. Unlike basic hedging, this version supports **Infinite Cycles** per market window—locking in profit and then immediately resetting for a new round if time permits.
+**Safety**: Includes an automated **Stop-Loss Circuit Breaker** to prevent chasing expensive hedges during parabolic trends.
+**Command:**
 ```bash
-# Safest autonomous 24/7 setting: $2 per trade, 0 fees.
-./trade btc --strategy reversion --tradeSizeUsd 2
+./trade btc --recursive-dynamic --shares 10 --price 35 --sl 1.12
 ```
 
-### 1. Wick Drift (Recursive Sniper) `[NEW]`
+### 2. Noise Reversion (Market Maker)
+**Flag:** `--reversion`
+**Timeframe:** 5M
+**Description:** Calculates a dynamic 20-tick EMA. Floats Buy orders at `EMA - Offset`. Acts as a liquidity provider to capture micro-spasms.
+**Command:**
+```bash
+./trade btc --reversion --tradeSizeUsd 5
+```
+
+### 3. Wick Drift (Recursive Sniper)
 **Flag:** `--wick-drift`
 **Timeframe:** 5M
-**Description:** The most advanced flagship strategy. Places deep limit orders (wicks) below the midpoint. If hit, it assumes a temporary market dislocation and immediately "drifts" a break-even hedge order onto the opposing book while aiming for a fixed USD profit. If the market isn't resolving within 60s, it aggressively moves the hedge order to break-even to prevent naked directional exposure. Can recursively trigger up to 3 times per 5-minute window if volatility is extreme.
+**Description:** Places deep limit orders below the midpoint. If hit, it assumes a temporary market dislocation and immediately hedges the opposing book for a profit.
 **Command:**
 ```bash
-# Aim for 35c entries, lock in guaranteed profit, 5 shares per cycle
-./trade btc --wick-drift --price=35 --shares=5
+./trade btc --wick-drift --price 35 --shares 5
 ```
 
-### 2. Dynamic Hedge (Leg-In Maker) `[NEW]`
+### 4. Dynamic Hedge (Leg-In Maker)
 **Flag:** `--dynamic-hedge`
 **Timeframe:** 5M
-**Description:** A liquidity provisioning system. It bids passively on *both* YES and NO tokens simultaneously at low prices. The moment one side is randomly filled ("Legs In"), it cancels the opposing order and calculates the exact price required to "Hedge Out" for a fixed 5c profit spread, walking the order up as time runs out.
+**Description:** Bids passively on both YES/NO. Once filled, it calculates the required hedge price to net a profit and "walks" the order up.
 **Command:**
 ```bash
-# Bid 35c simultaneously on YES and NO, dynamically hedge the remainder
-./trade btc --dynamic-hedge --price=35 --shares=10
+./trade btc --dynamic-hedge --price 35 --shares 10
 ```
 
-### 3. Fixed Hedge (Yield Farmer)
+### 5. Fixed Hedge (Yield Farmer)
 **Flag:** `--simple-hedge`
 **Timeframe:** 5M
-**Description:** The simplest yield generation bot. Posts passive limit orders at exactly `Price X` on both sides. Assuming a `35c` limit, if the market whipsaws and hits *both* sides, you spend 70c to guarantee a $1.00 payout (+30c profit). If only one side hits, the position carries to expiry.
-**Command:**
-```bash
-# Post 35c limits across the board
-./trade btc --simple-hedge --price=35 --size=20
-```
+**Description:** Posts passive limit orders at a fixed price on both sides. If market volatility hits both, a 30c+ net profit is guaranteed.
 
-### 4. Mean Reversion (Fat-Finger Hunter)
-**Flag:** `--usa-session` or `--mean-reversion`
-**Timeframe:** 15m
-**Description:** Specifically tuned for massive liquidity gaps. Places `1c` or `5c` buy orders and simply waits for a user to market-sell into the void. Completely passive.
-
-### 6. Dip-Arb (The Original)
-**Flag:** `(default)`
-**Timeframe:** 15m
-**Description:** Scans the real-time WebSocket firehose. If the price drops by 15%, it market-buys into the panic. Uses a weighted cost basis to exit at a specified target sum.
-**Command:**
-```bash
-./trade btc --dip=0.15 --shares=10
-```
-
----
-
-## 🔬 Scripts & Tools
-
-The repository includes powerful standalone scripts outside the main bot context:
-
-### Advanced Log Analyzer
-Used to backtest historical price ticks across Polymarket environments to build Expected Value (EV) mathematical models.
-```bash
-npx tsx src/scripts/analyze.ts
-```
-
-### Auto-Redeem Sweeper
-Cleans out finished positions and converts them back to cold USDC natively using Polygon Network via Gasless Relayer endpoints.
-```bash
-./trade -redeem
-```
+### 6. Mean Reversion & Dip-Arb
+**Flags:** `--usa-session` (15m) / `--dip` (15m)
+**Description:** Strategies tuned for liquidity gaps and massive 15-20% dumps. 
 
 ---
 
@@ -148,18 +120,18 @@ The bot features a standalone Terminal-based dashboard that aggregates the live 
 ```
 
 **Features:**
-- **On-Chain Accuracy**: Bypasses the CLOB cache, using standard RPC queries on the Polygon USDC.e contract to fetch exact precision values.
-- **Dual Wallet Tracking**: Specifically renders Capital allocated to the Smart Wallet (Proxy) distinct from your Gas (EOA) wallet.
-- **Portfolio Aggregation**: Polls the Polymarket open-positions API to aggregate the exact real-time net-liquidation value of all your active hedges onto the dashboard.
+- **On-Chain Accuracy**: Uses standard RPC queries on the Polygon USDC.e contract.
+- **Dual Wallet Tracking**: Renders Proxy (Strategy) and EOA (Gas) balances separately.
+- **Portfolio Aggregation**: Aggregates real-time net-liquidation value of all active positions.
 
 ---
 
 ## ⚡ Technical Architecture Highlights
-- **WhatsApp/Socket Swarm**: Jitter-reaper routines load-balance 50+ concurrent websocket subscriptions to prevent API ban-hammering.
-- **Pre-Warming**: Subscribes to Token IDs for market *T+1* while market *T* is in its final 30 seconds to ensure 0ms gap in bid placements.
-- **Mutex Tick Processing**: Locks individual token-pair processing at the millisecond level to prevent "Double Buys" during extreme volume spasms.
-- **Gasless Native API**: Full EIP-712 typed-signature integration with Relayer V2, automatically merging opposite positions into USDC to negate settlement fees.
+- **WebSocket Swarm**: Jitter-reaper routines manage staggered worker connections to ensure sub-10ms snapshot delivery.
+- **Stop-Loss Circuit Breaker**: Strategic "Safety Fuse" that terminates round exposure if market move exceeds profitable bounds.
+- **PnL Mutex Tracking**: High-precision accounting that tracks `roundInitialSize` to ensure PnL is accurate even with recursive partial fills.
+- **Gasless Native API**: Full EIP-712 typed-signature integration with Relayer V2 for zero-fee maintenance.
 
 ---
 ## ⚠️ Disclaimer
-This is highly experimental autonomous HFT software. Always test strategies with `--shares=5` (the lowest possible limit) before allocating larger USD sizes. Trading carries significant risk.
+This is highly experimental autonomous HFT software. Always test strategies with minimum sizes before allocating larger USDC amounts. Trading carries significant risk.

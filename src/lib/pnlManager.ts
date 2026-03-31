@@ -33,7 +33,7 @@ export interface CycleStats {
     status: 'OPEN' | PnlReason;
 }
 
-export type PnlReason = 'WIN' | 'LOSS' | 'ABANDON' | 'EARLY_EXIT' | 'LATE_EXIT' | 'ARB' | 'ARB_LOCKED' | 'EXPIRED';
+export type PnlReason = 'WIN' | 'LOSS' | 'ABANDON' | 'EARLY_EXIT' | 'LATE_EXIT' | 'ARB' | 'ARB_LOCKED' | 'EXPIRED' | 'STOPLOSS';
 
 interface GlobalState {
     coins: Record<string, CoinPnL>;
@@ -218,7 +218,7 @@ export class PnlManager {
             stats.cyclesCompleted++;
             if (result === 'WIN' || result === 'EARLY_EXIT' || result === 'LATE_EXIT' || result === 'ARB') {
                 stats.cyclesWon++;
-            } else if (result === 'LOSS') {
+            } else if (result === 'LOSS' || result === 'STOPLOSS') {
                 stats.cyclesLost++;
             } else {
                 stats.cyclesAbandoned++;
