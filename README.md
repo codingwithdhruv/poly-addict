@@ -35,8 +35,8 @@ RELAYER_API_KEY_ADDRESS=0x... (EOA Address)
 The fastest way to run the bot is using the included shell wrapper:
 ```bash
 chmod +x trade
-./trade btc --dashboard      # Start the dual-balance portfolio tracker
-./trade btc --wick-drift     # Start the flagship Wick Drift algorithm
+./trade -dashboard           # Start the dual-balance portfolio tracker
+./trade btc --strategy reversion --tradeSizeUsd 2 # Run the 24/7 Noise Reversion Bot
 ```
 
 ---
@@ -56,13 +56,23 @@ Regardless of which strategy you run, the following constraints and settings app
 | Flag | Description | Polymarket Rules |
 | :--- | :--- | :--- |
 | `--shares=<N>` | Fixed number of shares to buy per leg. | **Must be $\geq$ 5** (Polymarket CLOB Minimum constraint). |
-| `--size=<N>` | Dollar value (`USDC`) to allocate per leg. | Bot automatically floors size to 5 shares if this implies $< 5$. |
-| `--price=<C>` | Target entry price (in cents, e.g. `35` = $0.35). | Cannot exceed `100` (=$1.00). Used by sniper/hedge strategies. |
+| `--tradeSizeUsd=<N>` | Dollar value (`USDC`) to allocate per leg. | Bot automatically floors size to 5 shares if this implies $< 5$. |
+| `--price=<C>` | Target entry price (in cents, e.g. `0.35` = $0.35). | Cannot exceed `1.00` (=$1.00). Used by sniper/hedge strategies. |
 | `--cooldown=<M>`| Minutes to wait if the bot fails consecutive hedges. | Default is `10` minutes. |
 
 ---
 
 ## 🛠 Trading Strategy Reference Guides
+
+### 1. Noise Reversion (Market Maker) `[NEW & RECOMMENDED]`
+**Flag:** `--strategy reversion`
+**Timeframe:** 5M
+**Description:** The most advanced, profitable, and safest strategy. Calculates a dynamic 20-tick EMA for both YES and NO tokens. Floats Limit Buy orders at exactly `EMA - $0.12`. By acting strictly as a liquidity provider during micro-flash-crashes, it avoids all taker fees (Maker = $0 fees). Automatically places take-profit sell limit orders upon entry. Perfect for $30 portfolios.
+**Command (Minimum Values):**
+```bash
+# Safest autonomous 24/7 setting: $2 per trade, 0 fees.
+./trade btc --strategy reversion --tradeSizeUsd 2
+```
 
 ### 1. Wick Drift (Recursive Sniper) `[NEW]`
 **Flag:** `--wick-drift`
@@ -81,7 +91,7 @@ Regardless of which strategy you run, the following constraints and settings app
 **Command:**
 ```bash
 # Bid 35c simultaneously on YES and NO, dynamically hedge the remainder
-./trade eth --dynamic-hedge --price=35 --shares=10
+./trade btc --dynamic-hedge --price=35 --shares=10
 ```
 
 ### 3. Fixed Hedge (Yield Farmer)
@@ -91,7 +101,7 @@ Regardless of which strategy you run, the following constraints and settings app
 **Command:**
 ```bash
 # Post 35c limits across the board
-./trade sol --simple-hedge --price=35 --size=20
+./trade btc --simple-hedge --price=35 --size=20
 ```
 
 ### 4. Mean Reversion (Fat-Finger Hunter)
@@ -99,14 +109,31 @@ Regardless of which strategy you run, the following constraints and settings app
 **Timeframe:** 15m
 **Description:** Specifically tuned for massive liquidity gaps. Places `1c` or `5c` buy orders and simply waits for a user to market-sell into the void. Completely passive.
 
-### 5. Dip-Arb (The Original)
+### 6. Dip-Arb (The Original)
 **Flag:** `(default)`
 **Timeframe:** 15m
-**Description:** The legacy system. Scans the real-time WebSocket firehose. If the price drops by $X\%$ (e.g. 15%) within a strict 3-second rolling window, it market-buys into the panic. Uses a weighted cost basis to exit at a specified target sum.
+**Description:** Scans the real-time WebSocket firehose. If the price drops by 15%, it market-buys into the panic. Uses a weighted cost basis to exit at a specified target sum.
 **Command:**
 ```bash
-# Enter if price drops 15%, buy 10 shares
 ./trade btc --dip=0.15 --shares=10
+```
+
+---
+
+## 🔬 Scripts & Tools
+
+The repository includes powerful standalone scripts outside the main bot context:
+
+### Advanced Log Analyzer
+Used to backtest historical price ticks across Polymarket environments to build Expected Value (EV) mathematical models.
+```bash
+npx tsx src/scripts/analyze.ts
+```
+
+### Auto-Redeem Sweeper
+Cleans out finished positions and converts them back to cold USDC natively using Polygon Network via Gasless Relayer endpoints.
+```bash
+./trade -redeem
 ```
 
 ---

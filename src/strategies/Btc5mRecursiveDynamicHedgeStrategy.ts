@@ -40,16 +40,18 @@ interface MarketState {
     status: 'ACTIVE' | 'EXPIRED';
     targetShares: number;
     roundPrice: number;    
+    roundNumber: number;
 
     // Phase Tracking
     phase: 'LEG_IN' | 'HEDGE' | 'HEDGED';
     hedgeSide?: 'YES' | 'NO';
     hedgeOrderId?: string;
     hedgeTargetPrice?: number;
+    hedgeStartTs?: number;
 }
 
-export class Btc5mDynamicHedgeStrategy implements Strategy {
-    name = "BTC 5m Dynamic Hedge Strategy (Leg-In)";
+export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
+    name = "5m Recursive Dynamic Hedge Strategy (Infinite Loop)";
 
     private clobClient?: ClobClient;
     private gammaClient: GammaClient;
@@ -61,7 +63,7 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
     private tradeShares = 0;
     private minPrice = 0.35;
     private maxPrice = 0.35;
-    private targetPairCost = 0.95; // [NEW] Default target pair cost = 0.95 (5c profit)
+    private targetPairCost = 0.95; 
     
     private lastCheckFillsTs = 0;
     private COOLDOWN_MS = 10 * 60 * 1000;
@@ -86,7 +88,7 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
         this.gammaClient = new GammaClient();
         this.priceSocket = new PriceSocket(this.onPriceUpdate.bind(this));
         this.pnlManager = new PnlManager();
-        this.COIN = (config as any)?.coin || "BTC";
+        this.COIN = config?.coin || "BTC";
 
         if (config?.tradeSizeUsd) this.tradeSizeUsd = config.tradeSizeUsd;
         if (config?.shares) this.tradeShares = config.shares;
@@ -103,14 +105,13 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
             }
         }
         if (config?.cooldownMinutes) this.COOLDOWN_MS = config.cooldownMinutes * 60 * 1000;
-        // Allows config to override target pair cost
         if ((config as any)?.targetPairCost) this.targetPairCost = (config as any).targetPairCost;
     }
 
     async init(clobClient: ClobClient): Promise<void> {
         this.clobClient = clobClient;
         const sizeDesc = this.tradeShares > 0 ? `${this.tradeShares} shares` : `$${this.tradeSizeUsd}/side`;
-        console.log(`[Btc5mDynamicHedge] Init: Max ${this.MAX_CONCURRENT} mkt, ${sizeDesc} | Leg-In @ ${this.minPrice}-${this.maxPrice}c | Target Cost: ${this.targetPairCost}`);
+        console.log(`[RecursiveDynamicHedge] Init: Max ${this.MAX_CONCURRENT} mkt, ${sizeDesc} | Leg-In @ ${this.minPrice}-${this.maxPrice}c | Target Cost: ${this.targetPairCost}`);
     }
 
     async run(): Promise<void> {
@@ -129,7 +130,7 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
             try {
                 await this.maintenanceLoop();
             } catch (e) {
-                console.error("[Btc5mDynamicHedge] Loop Error:", e);
+                console.error("[RecursiveDynamic] Loop Error:", e);
             } finally {
                 this.isProcessing = false;
             }
@@ -143,10 +144,10 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
 
         if (this.cooldownUntil && now < this.cooldownUntil) {
             const left = Math.ceil((this.cooldownUntil - now) / 1000);
-            if (left % 30 === 0) console.log(`[Btc5mDynamicHedge] Cooling down... ${left}s remaining.`);
+            if (left % 30 === 0) console.log(`[RecursiveDynamic] Cooling down... ${left}s remaining.`);
             return;
         } else if (this.cooldownUntil && now >= this.cooldownUntil) {
-            console.log(`[Btc5mDynamicHedge] Cooldown expired. Resuming.`);
+            console.log(`[RecursiveDynamic] Cooldown expired. Resuming.`);
             this.cooldownUntil = null;
             this.consecutiveFailures = 0;
         }
@@ -158,7 +159,7 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
                 this.handleMarketExpiry(state).then(() => {
                     this.activeMarkets.delete(marketId);
                 }).catch(e => {
-                    console.error(`[Btc5mDynamicHedge] Expiry error:`, e);
+                    console.error(`[RecursiveDynamic] Expiry error:`, e);
                     this.activeMarkets.delete(marketId);
                 });
                 continue;
@@ -189,19 +190,31 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
     }
 
     private async manageHedge(state: MarketState, timeLeftSeconds: number) {
-        if (state.phase !== 'HEDGE' || !state.hedgeOrderId || !state.hedgeTargetPrice) return;
+        if (state.phase !== 'HEDGE' || !state.hedgeOrderId || !state.hedgeTargetPrice || !state.hedgeStartTs) return;
         
         let relaxedPrice = state.hedgeTargetPrice;
+        
+        const huntingSecs = Math.floor((Date.now() - state.hedgeStartTs) / 1000);
+        
         if (timeLeftSeconds < 20) {
-            relaxedPrice = Math.min(0.99, state.hedgeTargetPrice + 0.15);
-        } else if (timeLeftSeconds < 60) {
-            relaxedPrice = Math.min(0.99, state.hedgeTargetPrice + 0.05); // Breakeven roughly
+            relaxedPrice = 0.99; // Total emergency capitulation take
+        } else if (huntingSecs >= 5) {
+            // Add +0.01 for every 5 seconds we sit idle, up to a max of 0.99
+            const increments = Math.floor(huntingSecs / 5);
+            let targetCost = (this.targetPairCost - state.roundPrice);
+            if (targetCost < 0.01) targetCost = 0.01;
+            
+            relaxedPrice = Math.min(0.99, (Math.floor(targetCost * 100) / 100) + (increments * 0.01));
         }
 
         relaxedPrice = Math.floor(relaxedPrice * 100) / 100;
 
-        if (relaxedPrice > state.hedgeTargetPrice + 0.01) {
-            console.log(color(`[Btc5mDynamicHedge] ⏳ Time running out (${timeLeftSeconds.toFixed(0)}s). Relaxing HEDGE bid to ${relaxedPrice}`, COLORS.YELLOW));
+        if (relaxedPrice > state.hedgeTargetPrice + 0.001) { // Floating point safety
+            if (timeLeftSeconds < 20) {
+                console.log(color(`[RecursiveDynamic] 🚨 EMERGENCY TAKER: < 20s left on ${state.slug}. Dumping at 0.99!`, COLORS.RED + COLORS.BRIGHT));
+            } else {
+                console.log(color(`[RecursiveDynamic] ⏳ Chasing Hedge (${timeLeftSeconds.toFixed(0)}s left). Relaxing bid to ${relaxedPrice.toFixed(2)}`, COLORS.YELLOW));
+            }
             
             await this.cancelOrder(state.hedgeOrderId);
             state.hedgeTargetPrice = relaxedPrice;
@@ -219,7 +232,7 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
                     state.hedgeOrderId = hOrder.orderID;
                 }
             } catch (e: any) {
-                console.error(`[Btc5mDynamicHedge] Failed to relax HEDGE order: ${e.message}`);
+                console.error(`[RecursiveDynamic] Failed to relax HEDGE order: ${e.message}`);
             }
         }
     }
@@ -241,11 +254,11 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
                         // @ts-ignore
                         if (order && (order.status === "MATCHED" || order.status === "FILLED" || parseFloat(order.size_matched) >= state.targetShares)) {
                             state.yesFilled = true;
-                            console.log(`[Btc5mDynamicHedge] ✅ YES Leg-In Filled for ${state.slug}`);
+                            console.log(`[RecursiveDynamic] ✅ YES Leg-In Filled for ${state.slug}`);
                             await this.triggerHedgeMode(state, 'NO');
                         }
                     } catch (e: any) { 
-                        if (!e?.message?.includes('ETIMEDOUT')) console.error(`[Btc5mDynamicHedge] YES GetOrder Error: ${e.message}`);
+                        if (!e?.message?.includes('ETIMEDOUT')) console.error(`[RecursiveDynamic] YES GetOrder Error: ${e.message}`);
                     }
                 })());
             }
@@ -257,11 +270,11 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
                         // @ts-ignore
                         if (order && (order.status === "MATCHED" || order.status === "FILLED" || parseFloat(order.size_matched) >= state.targetShares)) {
                             state.noFilled = true;
-                            console.log(`[Btc5mDynamicHedge] ✅ NO Leg-In Filled for ${state.slug}`);
+                            console.log(`[RecursiveDynamic] ✅ NO Leg-In Filled for ${state.slug}`);
                             if (!state.yesFilled) await this.triggerHedgeMode(state, 'YES');
                         }
                     } catch (e: any) { 
-                        if (!e?.message?.includes('ETIMEDOUT')) console.error(`[Btc5mDynamicHedge] NO GetOrder Error: ${e.message}`);
+                        if (!e?.message?.includes('ETIMEDOUT')) console.error(`[RecursiveDynamic] NO GetOrder Error: ${e.message}`);
                     }
                 })());
             }
@@ -275,10 +288,28 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
                             if (state.hedgeSide === 'YES') state.yesFilled = true;
                             else state.noFilled = true;
                             state.phase = 'HEDGED';
-                            console.log(color(`[Btc5mDynamicHedge] 🛡️ HEDGE SECURED for ${state.slug}!`, COLORS.BRIGHT + COLORS.GREEN));
+                            console.log(color(`[RecursiveDynamic] 🛡️ HEDGE SECURED for ${state.slug} (Round ${state.roundNumber})!`, COLORS.BRIGHT + COLORS.GREEN));
+                            
+                            // Immediately Log Cycle as Win
+                            const profit = (state.targetShares * (this.targetPairCost - state.roundPrice - (state.hedgeTargetPrice || 0)));
+                            this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'WIN', profit);
+                            
+                            this.stats.totalHedges++;
+                            this.stats.hedgeSuccess++;
+                            this.consecutiveFailures = 0;
+
+                            const timeLeftSec = Math.max(0, (state.endTime - Date.now()) / 1000);
+                            
+                            if (timeLeftSec < 90) {
+                                console.log(color(`[RecursiveDynamic] ⏱️ < 90s left on ${state.slug}, halting loop to prevent late exposure traps.`, COLORS.YELLOW));
+                            } else {
+                                console.log(color(`[RecursiveDynamic] 🔄 Resetting state for Round ${state.roundNumber + 1}...`, COLORS.CYAN));
+                                setTimeout(() => this.resetCycle(state), 2500); // 2.5s anti-spam sleep
+                            }
+
                         }
                     } catch (e: any) { 
-                        if (!e?.message?.includes('ETIMEDOUT')) console.error(`[Btc5mDynamicHedge] Hedge GetOrder Error: ${e.message}`);
+                        if (!e?.message?.includes('ETIMEDOUT')) console.error(`[RecursiveDynamic] Hedge GetOrder Error: ${e.message}`);
                     }
                 })());
             }
@@ -305,8 +336,9 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
         if (targetCost > 0.99) targetCost = 0.99;
         if (targetCost < 0.01) targetCost = 0.01;
         state.hedgeTargetPrice = Math.floor(targetCost * 100) / 100;
+        state.hedgeStartTs = Date.now();
 
-        console.log(color(`[Btc5mDynamicHedge] 🔄 ENTERING HEDGE MODE. Bidding ${sideToHedge} @ ${state.hedgeTargetPrice}`, COLORS.MAGENTA));
+        console.log(color(`[RecursiveDynamic] 🔄 ENTERING HEDGE MODE. Bidding ${sideToHedge} @ ${state.hedgeTargetPrice}`, COLORS.MAGENTA));
 
         const tokenIdx = sideToHedge === 'YES' ? 0 : 1;
         try {
@@ -321,12 +353,41 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
                 state.hedgeOrderId = hOrder.orderID;
             }
         } catch (e: any) {
-            console.error(`[Btc5mDynamicHedge] Failed to post HEDGE: ${e.message}`);
+            console.error(`[RecursiveDynamic] Failed to post HEDGE: ${e.message}`);
         }
     }
 
+    private async resetCycle(state: MarketState) {
+        if (state.status !== 'ACTIVE') return;
+        
+        // Auto-Sweep previous cycle dust just to be clean and recoup USDC collateral
+        try {
+            await redeemPositions();
+        } catch (e) {
+            // Ignore redeem fail
+        }
+
+        state.roundNumber++;
+        state.phase = 'LEG_IN';
+        state.yesOrderId = undefined;
+        state.noOrderId = undefined;
+        state.hedgeOrderId = undefined;
+        state.hedgeStartTs = undefined;
+        state.yesFilled = false;
+        state.noFilled = false;
+        state.ordersPlaced = false;
+        
+        // Pick new random price
+        let roundPrice = this.minPrice + Math.random() * (this.maxPrice - this.minPrice);
+        state.roundPrice = Math.floor(roundPrice * 100) / 100;
+        state.targetShares = this.calcSizeForPrice(state.roundPrice);
+
+        this.pnlManager.startCycle(this.COIN, `${state.marketId}-${state.roundNumber}`, state.slug);
+        await this.placeDualOrders(state);
+    }
+
     private async handleMarketExpiry(state: MarketState) {
-        console.log(`[Btc5mDynamicHedge] 🏁 Market Expired: ${state.slug}`);
+        console.log(`[RecursiveDynamic] 🏁 Market Expired: ${state.slug}`);
 
         if (state.yesOrderId && !state.yesFilled) await this.cancelOrder(state.yesOrderId);
         if (state.noOrderId && !state.noFilled) await this.cancelOrder(state.noOrderId);
@@ -343,7 +404,11 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
         let outcome = "NEUTRAL";
 
         if (state.yesFilled && state.noFilled) {
-            outcome = "HEDGE_SUCCESS";
+            // Unlikely we hit expiration exactly inside HEDGED without checkFills realizing it since it blocks looping.
+            // But if we do, tally it!
+            outcome = "HEDGE_SUCCESS_ON_WIRE";
+            const profit = (state.targetShares * (this.targetPairCost - state.roundPrice - (state.hedgeTargetPrice || 0)));
+            this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'WIN', profit);
             this.stats.totalHedges++;
             this.stats.hedgeSuccess++;
             this.consecutiveFailures = 0;
@@ -361,18 +426,14 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
                 this.consecutiveFailures++;
             }
             this.stats.neutral++;
-        }
-
-        if (outcome === 'HEDGE_SUCCESS') {
-            const profit = (state.targetShares * (this.targetPairCost - state.roundPrice - (state.hedgeTargetPrice || 0)));
-            this.pnlManager.closeCycle(state.marketId, 'WIN', profit);
-        } else if (outcome.includes('FAILURE') || outcome.includes('EXPOSED')) {
-            this.pnlManager.closeCycle(state.marketId, 'LOSS', -(state.targetShares * state.roundPrice));
+            // Mark the failed loop/round as a LOSS
+            this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'LOSS', -(state.targetShares * state.roundPrice));
         } else {
-            this.pnlManager.closeCycle(state.marketId, 'EXPIRED', 0);
+            // Nothing was filled in the final loop round
+            this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'EXPIRED', 0);
         }
 
-        console.log(`[Btc5mDynamicHedge] Result for ${state.slug}: ${outcome}`);
+        console.log(`[RecursiveDynamic] Final result for ${state.slug} (Round ${state.roundNumber}): ${outcome}`);
 
         console.log(color("🔄 Auto-Redeeming...", COLORS.CYAN));
         try {
@@ -382,7 +443,7 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
         }
 
         if (this.consecutiveFailures >= 2) {
-            console.warn(color(`[Btc5mDynamicHedge] ⚠️ ${this.consecutiveFailures} Unhedged Exposures. Cooldown ${(this.COOLDOWN_MS / 60000).toFixed(1)}m.`, COLORS.RED));
+            console.warn(color(`[RecursiveDynamic] ⚠️ ${this.consecutiveFailures} Unhedged Exposures. Cooldown ${(this.COOLDOWN_MS / 60000).toFixed(1)}m.`, COLORS.RED));
             this.cooldownUntil = Date.now() + this.COOLDOWN_MS;
         }
     }
@@ -447,6 +508,7 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
             status: 'ACTIVE',
             targetShares: 0,
             roundPrice: 0,
+            roundNumber: 1, // Start Round 1
             phase: 'LEG_IN'
         };
 
@@ -464,10 +526,21 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
             } catch (e) { }
         }
 
+        const p1 = state.prices.get(tokenIds[0]);
+        const p2 = state.prices.get(tokenIds[1]);
+        if (p1 !== undefined && p2 !== undefined) {
+            if (Math.abs(p1 - p2) >= 0.30) {
+                console.log(color(`[RecursiveDynamic] ⚠️ Momentum filter blocked Leg-In for ${state.slug} (Spread too wide: ${p1.toFixed(2)} vs ${p2.toFixed(2)})`, COLORS.YELLOW));
+                this.activeMarkets.delete(market.id);
+                return;
+            }
+        }
+
         let roundPrice = this.minPrice + Math.random() * (this.maxPrice - this.minPrice);
         state.roundPrice = Math.floor(roundPrice * 100) / 100;
         state.targetShares = this.calcSizeForPrice(state.roundPrice);
 
+        this.pnlManager.startCycle(this.COIN, `${state.marketId}-${state.roundNumber}`, state.slug);
         await this.placeDualOrders(state);
     }
 
@@ -501,7 +574,7 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
             state.targetShares = size;
         }
 
-        console.log(`[Btc5mDynamicHedge] Posting ${state.slug} Leg-In Limits: YES/NO @ ${price.toFixed(2)} (Size: ${size})`);
+        console.log(`[RecursiveDynamic] Posting ${state.slug} Leg-In Limits: YES/NO @ ${price.toFixed(2)} (Size: ${size}) [ROUND ${state.roundNumber}]`);
 
         try {
             const yesOrder = await this.clobClient.createAndPostOrder({
@@ -512,7 +585,6 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
             }, { tickSize: "0.01" });
             if (yesOrder?.orderID) {
                 state.yesOrderId = yesOrder.orderID;
-                this.pnlManager.startCycle(this.COIN, state.marketId, state.slug);
             }
         } catch (e) { }
 
@@ -525,12 +597,11 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
             }, { tickSize: "0.01" });
             if (noOrder?.orderID) {
                 state.noOrderId = noOrder.orderID;
-                if (!state.yesOrderId) this.pnlManager.startCycle(this.COIN, state.marketId, state.slug);
             }
         } catch (e) { }
 
         if (state.yesOrderId || state.noOrderId) {
-            this.pnlManager.updateCycleCost(state.marketId, state.yesOrderId ? size * price : 0, state.noOrderId ? size * price : 0);
+            this.pnlManager.updateCycleCost(`${state.marketId}-${state.roundNumber}`, state.yesOrderId ? size * price : 0, state.noOrderId ? size * price : 0);
         }
         state.ordersPlaced = true;
     }
@@ -539,7 +610,7 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
         if (!this.clobClient) return;
         try {
             await this.clobClient.cancelOrder({ orderID: orderId });
-            console.log(`[Btc5mDynamicHedge] Cancelled Order ${orderId}`);
+            console.log(`[RecursiveDynamic] Cancelled Order ${orderId}`);
         } catch (e) { }
     }
 
@@ -595,7 +666,7 @@ export class Btc5mDynamicHedgeStrategy implements Strategy {
                 `${color("[STATUS]", COLORS.CYAN)} ` +
                 `${color(timeStr.padEnd(12), timerColor)} | ` +
                 `Px: ${color(p1, p1Color)}/${color(p2, p2Color)} | ` +
-                `${posStr} ${phaseStr} ${color(state.slug, COLORS.DIM + COLORS.WHITE)}`
+                `${posStr} ${phaseStr} ${color(state.slug, COLORS.DIM + COLORS.WHITE)} (Rnd: ${state.roundNumber})`
             );
         }
     }

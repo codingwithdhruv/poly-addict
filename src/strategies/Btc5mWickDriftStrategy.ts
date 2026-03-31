@@ -72,7 +72,7 @@ export class Btc5mWickDriftStrategy implements Strategy {
     
     private lastCheckFillsTs = 0;
     private COOLDOWN_MS = 10 * 60 * 1000;
-    private readonly COIN = "BTC";
+    private readonly COIN: string;
 
     private activeMarkets = new Map<string, MarketState>();
     private cooldownUntil: number | null = null;
@@ -85,6 +85,7 @@ export class Btc5mWickDriftStrategy implements Strategy {
         this.gammaClient = new GammaClient();
         this.priceSocket = new PriceSocket(this.onPriceUpdate.bind(this));
         this.pnlManager = new PnlManager();
+        this.COIN = (config as any)?.coin || "BTC";
 
         if (config?.tradeSizeUsd) this.tradeSizeUsd = config.tradeSizeUsd;
         if (config?.shares) this.tradeShares = config.shares;

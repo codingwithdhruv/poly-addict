@@ -55,7 +55,7 @@ export class Btc15mExtremeMeanReversionStrategy implements Strategy {
     private tradeSizeUsd = 20;
     private limitPrice = 0.01; // Default Extreme
     private side: SideInput = 'BOTH';
-    private readonly COIN = "BTC";
+    private readonly COIN: string;
 
     // State
     private activeMarkets = new Map<string, MarketState>();
@@ -65,6 +65,7 @@ export class Btc15mExtremeMeanReversionStrategy implements Strategy {
     constructor(config?: Partial<DipArbConfig>) {
         this.gammaClient = new GammaClient();
         this.priceSocket = new PriceSocket(this.onPriceUpdate.bind(this));
+        this.COIN = (config as any)?.coin || "BTC";
 
         if (config?.tradeSizeUsd) {
             this.tradeSizeUsd = config.tradeSizeUsd;

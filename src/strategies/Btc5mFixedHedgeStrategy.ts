@@ -60,7 +60,7 @@ export class Btc5mFixedHedgeStrategy implements Strategy {
     private currentRoundPrice = 0.35; // Selected price for the "current" market
     private lastCheckFillsTs = 0; // [FIX] Debounce timer for order polling
     private COOLDOWN_MS = 10 * 60 * 1000; // Default 10 mins
-    private readonly COIN = "BTC";
+    private readonly COIN: string;
 
     // State
     private activeMarkets = new Map<string, MarketState>();
@@ -82,6 +82,7 @@ export class Btc5mFixedHedgeStrategy implements Strategy {
     constructor(config?: Partial<DipArbConfig>) {
         this.gammaClient = new GammaClient();
         this.priceSocket = new PriceSocket(this.onPriceUpdate.bind(this));
+        this.COIN = (config as any)?.coin || "BTC";
 
         if (config?.tradeSizeUsd) {
             this.tradeSizeUsd = config.tradeSizeUsd;

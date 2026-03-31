@@ -207,7 +207,7 @@ export function parseCliArgs(): DipArbConfig {
         // windowMinutes removed
         ignorePriceBelow: getArgValue('min-price', defaults.ignorePriceBelow!), // exposed as --min-price
         minExpectedProfit: getArgValue('min-profit', defaults.minExpectedProfit!),
-        tradeSizeUsd: getArgValue('size', 20) || getArgValue('amount', 20),
+        tradeSizeUsd: getArgValue('tradeSizeUsd', getArgValue('size', getArgValue('amount', 20))),
         limitPrice: (() => {
             // Check for explicit --price flag
             let val = getArgValue('price', -1);
@@ -232,13 +232,24 @@ export function parseCliArgs(): DipArbConfig {
         redeem: args.includes('-redeem') || args.includes('--redeem'),
         dashboard: args.includes('-dashboard') || args.includes('--dashboard'),
         // Strategy Selection
-        strategy: (args.includes('--arb') || args.includes('-arb')) ? 'true-arb' :
-            (args.includes('--btc5m') || args.find(a => a.startsWith('--strategy=btc5m'))) ? 'btc5m' :
-                (args.includes('--wick-drift') || args.find(a => a.startsWith('--strategy=wick-drift'))) ? 'wick-drift' :
-                (args.includes('--dynamic-hedge') || args.find(a => a.startsWith('--strategy=dynamic-hedge'))) ? 'dynamic-hedge' :
-                (args.includes('--simple-hedge') || args.find(a => a.startsWith('--strategy=simple-hedge'))) ? 'simple-hedge' :
-                    (args.includes('--usa-session') || args.includes('--mean-reversion') ||
-                        args.some((a, i) => (a === '--strategy' && (args[i + 1] === 'usa-session' || args[i + 1] === 'mean-reversion')))) ? 'usa-session' : 'dip',
+        strategy: (() => {
+            if (args.includes('--arb') || args.includes('-arb')) return 'true-arb';
+            if (args.includes('--btc5m') || args.find(a => a.startsWith('--strategy=btc5m'))) return 'btc5m';
+            if (args.includes('--wick-drift') || args.find(a => a.startsWith('--strategy=wick-drift'))) return 'wick-drift';
+            if (args.includes('--dynamic-hedge') || args.find(a => a.startsWith('--strategy=dynamic-hedge'))) return 'dynamic-hedge';
+            if (args.includes('--recursive-dynamic') || args.find(a => a.startsWith('--strategy=recursive-dynamic'))) return 'recursive-dynamic';
+            if (args.includes('--simple-hedge') || args.find(a => a.startsWith('--strategy=simple-hedge'))) return 'simple-hedge';
+            if (args.includes('--usa-session') || args.includes('--mean-reversion')) return 'usa-session';
+            
+            const strategyIdx = args.indexOf('--strategy');
+            if (strategyIdx !== -1 && strategyIdx < args.length - 1) {
+                const s = args[strategyIdx + 1];
+                if (s === 'usa-session' || s === 'mean-reversion') return 'usa-session';
+                if (s === 'reversion') return 'reversion';
+                if (s === 'recursive-dynamic') return 'recursive-dynamic';
+            }
+            return 'dip';
+        })(),
         makerBias: defaults.makerBias
     };
 }

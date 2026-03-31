@@ -9,6 +9,8 @@ import { PnlManager } from "./lib/pnlManager.js"; // Import PnlManager
 import { Btc5mFixedHedgeStrategy } from "./strategies/Btc5mFixedHedgeStrategy.js";
 import { Btc5mDynamicHedgeStrategy } from "./strategies/Btc5mDynamicHedgeStrategy.js";
 import { Btc5mWickDriftStrategy } from "./strategies/Btc5mWickDriftStrategy.js";
+import { Btc5mNoiseReversionStrategy } from "./strategies/Btc5mNoiseReversionStrategy.js";
+import { Btc5mRecursiveDynamicHedgeStrategy } from "./strategies/Btc5mRecursiveDynamicHedgeStrategy.js";
 import { Btc15mExtremeMeanReversionStrategy } from "./strategies/Btc15mExtremeMeanReversionStrategy.js";
 import { redeemPositions } from "./scripts/redeem.js";
 import dns from 'dns';
@@ -212,8 +214,12 @@ async function main() {
         strategy = new Btc5mVolatilityStrategy(args);
     } else if (args.strategy === 'wick-drift') {
         strategy = new Btc5mWickDriftStrategy(args);
+    } else if (args.strategy === 'reversion') {
+        strategy = new Btc5mNoiseReversionStrategy({ ...args, tradeSizeUsd: 2 });
     } else if (args.strategy === 'dynamic-hedge') {
         strategy = new Btc5mDynamicHedgeStrategy(args);
+    } else if (args.strategy === 'recursive-dynamic') {
+        strategy = new Btc5mRecursiveDynamicHedgeStrategy(args);
     } else if (args.strategy === 'simple-hedge') {
         strategy = new Btc5mFixedHedgeStrategy(args);
     } else if (args.strategy === 'usa-session') {
