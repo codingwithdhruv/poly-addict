@@ -1,4 +1,4 @@
-import { WebSocket } from "ws";
+import WebSocket from "ws";
 
 const WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 

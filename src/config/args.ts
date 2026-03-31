@@ -21,7 +21,6 @@ interface CliArgs {
     limitPrice?: number | string;   // [NEW] Fixed price for Simple Hedge
     cooldownMinutes?: number; // [NEW] Dynamic cooldown for Simple Hedge
     side?: SideInput; // [NEW] Side for MeanReversion
-    stopLoss?: number; // [NEW] Stop-loss threshold for Recursive Hedge
 }
 
 function isWeekendLowVolIST(): boolean {
@@ -250,20 +249,6 @@ export function parseCliArgs(): DipArbConfig {
                 if (s === 'recursive-dynamic') return 'recursive-dynamic';
             }
             return 'dip';
-        })(),
-        stopLoss: (() => {
-            let val = getArgValue('stop-loss', getArgValue('sl', 1.15));
-            // If user provides "20" (meaning 20%), handle converting?
-            // Actually, for Hedge it's easier to specify the absolute price sum threshold (e.g. 1.15).
-            if (val > 2) {
-                // If provided as e.g. 20 for 20% loss, convert to 1.15 approx (Assume start at 0.95 + 0.20)
-                // But safer to just let user provide the absolute sum.
-                // Defaults to 1.15.
-                // If user provides "10" for 10% loss on a $1 share, then 0.10. 
-                // Sum would be 1.05? No, sum at 1.15 is clear.
-                return 0.95 + (val / 100); 
-            }
-            return val;
         })(),
         makerBias: defaults.makerBias
     };

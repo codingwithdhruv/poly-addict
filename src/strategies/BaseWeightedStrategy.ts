@@ -137,7 +137,6 @@ export interface WeightedStrategyConfig {
     side?: 'YES' | 'NO' | 'BOTH';
     cooldownMinutes?: number;
     strategy?: string;
-    stopLoss?: number;
 }
 
 /**

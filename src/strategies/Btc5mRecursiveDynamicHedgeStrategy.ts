@@ -41,7 +41,6 @@ interface MarketState {
     targetShares: number;
     roundPrice: number;    
     roundNumber: number;
-    roundInitialSize: number;
 
     // Phase Tracking
     phase: 'LEG_IN' | 'HEDGE' | 'HEDGED';
@@ -49,6 +48,11 @@ interface MarketState {
     hedgeOrderId?: string;
     hedgeTargetPrice?: number;
     hedgeStartTs?: number;
+
+    // Accuracy & Multi-Fill Tracking
+    totalHedgeCostUsd: number;
+    hedgeMatchedSoFar: number;
+    lastReportedMatched: number; // For the *current* active order only
 }
 
 export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
@@ -65,7 +69,6 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
     private minPrice = 0.35;
     private maxPrice = 0.35;
     private targetPairCost = 0.95; 
-    private stopLossLimit = 1.15; // Emergency exit if total cost > 1.15
     
     private lastCheckFillsTs = 0;
     private COOLDOWN_MS = 10 * 60 * 1000;
@@ -75,6 +78,9 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
     private cooldownUntil: number | null = null;
     private consecutiveFailures = 0;
     private destroyed = false;
+
+    private lastRedeemTs = 0;
+    private readonly REDEEM_THROTTLE_MS = 5 * 60 * 1000;
 
     private stats = {
         totalHedges: 0,
@@ -108,7 +114,6 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
         }
         if (config?.cooldownMinutes) this.COOLDOWN_MS = config.cooldownMinutes * 60 * 1000;
         if ((config as any)?.targetPairCost) this.targetPairCost = (config as any).targetPairCost;
-        if (config?.stopLoss) this.stopLossLimit = config.stopLoss;
     }
 
     async init(clobClient: ClobClient): Promise<void> {
@@ -207,17 +212,6 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
             const stepToMarket = Math.min(0.98, currentAsk + 0.01);
             let targetCost = (this.targetPairCost - state.roundPrice);
             if (targetCost < 0.01) targetCost = 0.01;
-
-            // [STOP-LOSS] Cancel & cleanup immediately
-            if (state.roundPrice + currentAsk > this.stopLossLimit) {
-                console.log(color(`[RecursiveDynamic] 🛑 STOP-LOSS TRIGGERED: ${state.slug} | Total Px: ${(state.roundPrice + currentAsk).toFixed(2)} > ${this.stopLossLimit}`, COLORS.RED + COLORS.BRIGHT));
-                await this.cancelOrder(state.hedgeOrderId);
-                this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'STOPLOSS', -(state.roundInitialSize * state.roundPrice));
-                this.consecutiveFailures++;
-                // Delete immediately to prevent ghost market in status logs
-                this.activeMarkets.delete(state.marketId);
-                return;
-            }
             
             const maxLinear = Math.min(0.95, (Math.floor(targetCost * 100) / 100) + (Math.floor(huntingSecs / 5) * 0.01));
             
@@ -228,9 +222,6 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
             }
         }
 
-        // Hard ceiling: never bid above breakeven ($1.00 payout - legIn cost - 1c margin)
-        const maxBreakeven = Math.floor((1.00 - state.roundPrice - 0.01) * 100) / 100;
-        relaxedPrice = Math.min(relaxedPrice, maxBreakeven);
         relaxedPrice = Math.floor(relaxedPrice * 100) / 100;
 
         if (relaxedPrice > state.hedgeTargetPrice + 0.001) { 
@@ -239,23 +230,31 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
                 if (orderStatus) {
                     const matchedStr = (orderStatus as any).size_matched;
                     const matchedFloat = parseFloat(matchedStr);
-                    if (!isNaN(matchedFloat) && matchedFloat > 0) {
-                        state.targetShares -= matchedFloat;
+                    if (!isNaN(matchedFloat) && matchedFloat > state.lastReportedMatched) {
+                        const delta = matchedFloat - state.lastReportedMatched;
+                        state.totalHedgeCostUsd += delta * (state.hedgeTargetPrice || 0);
+                        state.hedgeMatchedSoFar += delta;
+                        state.lastReportedMatched = matchedFloat;
+                        
+                        state.targetShares -= delta;
                         state.targetShares = Math.max(0, state.targetShares);
-                        console.log(color(`[RecursiveDynamic] 🧩 PARTIAL FILL DETECTED: ${matchedFloat} shares secured! Remaining: ${state.targetShares}`, COLORS.GREEN));
+                        console.log(color(`[RecursiveDynamic] 🧩 PARTIAL FILL DETECTED: ${delta} shares secured! Weighted Cost so far: $${state.totalHedgeCostUsd.toFixed(2)}`, COLORS.GREEN));
                     }
                     
                     if ((orderStatus as any).status === "MATCHED" || (orderStatus as any).status === "FILLED" || state.targetShares <= 0) {
                          if (state.hedgeSide === 'YES') state.yesFilled = true;
                          else state.noFilled = true;
                          state.phase = 'HEDGED';
-                         const totalCost = state.roundPrice + (state.hedgeTargetPrice || 0);
-                         const profit = state.roundInitialSize * (1.00 - totalCost);
-                         const isProfitable = profit >= 0;
-                         console.log(color(`[RecursiveDynamic] 🛡️ HEDGE SECURED for ${state.slug} (Rnd ${state.roundNumber}) | Cost: ${state.roundPrice}+${state.hedgeTargetPrice?.toFixed(2)}=${totalCost.toFixed(2)} | PnL: ${isProfitable ? '+' : ''}$${profit.toFixed(2)}`, isProfitable ? COLORS.BRIGHT + COLORS.GREEN : COLORS.RED));
-                         this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, isProfitable ? 'WIN' : 'LOSS', profit);
+                         console.log(color(`[RecursiveDynamic] 🛡️ HEDGE SECURED for ${state.slug} (Round ${state.roundNumber}) during sys sweep!`, COLORS.BRIGHT + COLORS.GREEN));
+                         
+                         // Accurate PnL: (Total Revenue) - (Total Cost)
+                         const totalShares = state.targetShares + state.hedgeMatchedSoFar;
+                         const totalCost = (totalShares * state.roundPrice) + state.totalHedgeCostUsd;
+                         const profit = this.calcTotalRevenue(state) - totalCost;
+                         
+                         this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'WIN', profit);
                          this.stats.totalHedges++;
-                         if (isProfitable) this.stats.hedgeSuccess++;
+                         this.stats.hedgeSuccess++;
                          this.consecutiveFailures = 0;
                          return;
                     }
@@ -337,19 +336,31 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
                     try {
                         const order = await this.clobClient!.getOrder(state.hedgeOrderId!);
                         // @ts-ignore
-                        if (order && (order.status === "MATCHED" || order.status === "FILLED" || parseFloat(order.size_matched) >= state.targetShares)) {
+                        const matchedFloat = parseFloat(order.size_matched);
+                        if (!isNaN(matchedFloat) && matchedFloat > state.lastReportedMatched) {
+                            const delta = matchedFloat - state.lastReportedMatched;
+                            state.totalHedgeCostUsd += delta * (state.hedgeTargetPrice || 0);
+                            state.hedgeMatchedSoFar += delta;
+                            state.lastReportedMatched = matchedFloat;
+                            // Optionally update targetShares here too, but normally checkFills is a passive observer
+                        }
+
+                        // @ts-ignore
+                        if (order && (order.status === "MATCHED" || order.status === "FILLED" || matchedFloat >= (state.targetShares + state.hedgeMatchedSoFar))) {
                             if (state.hedgeSide === 'YES') state.yesFilled = true;
                             else state.noFilled = true;
                             state.phase = 'HEDGED';
+                            console.log(color(`[RecursiveDynamic] 🛡️ HEDGE SECURED for ${state.slug} (Round ${state.roundNumber})!`, COLORS.BRIGHT + COLORS.GREEN));
                             
-                            const totalCost = state.roundPrice + (state.hedgeTargetPrice || 0);
-                            const profit = state.roundInitialSize * (1.00 - totalCost);
-                            const isProfitable = profit >= 0;
-                            console.log(color(`[RecursiveDynamic] 🛡️ HEDGE SECURED for ${state.slug} (Rnd ${state.roundNumber}) | Cost: ${state.roundPrice}+${state.hedgeTargetPrice?.toFixed(2)}=${totalCost.toFixed(2)} | PnL: ${isProfitable ? '+' : ''}$${profit.toFixed(2)}`, isProfitable ? COLORS.BRIGHT + COLORS.GREEN : COLORS.RED));
-                            this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, isProfitable ? 'WIN' : 'LOSS', profit);
+                            // Immediately Log Cycle as Win
+                            const totalRev = (state.targetShares + state.hedgeMatchedSoFar) * this.targetPairCost;
+                            const totalCost = ((state.targetShares + state.hedgeMatchedSoFar) * state.roundPrice) + state.totalHedgeCostUsd;
+                            const profit = totalRev - totalCost;
+
+                            this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'WIN', profit);
                             
                             this.stats.totalHedges++;
-                            if (isProfitable) this.stats.hedgeSuccess++;
+                            this.stats.hedgeSuccess++;
                             this.consecutiveFailures = 0;
 
                             const timeLeftSec = Math.max(0, (state.endTime - Date.now()) / 1000);
@@ -391,6 +402,7 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
         if (targetCost < 0.01) targetCost = 0.01;
         state.hedgeTargetPrice = Math.floor(targetCost * 100) / 100;
         state.hedgeStartTs = Date.now();
+        state.lastReportedMatched = 0;
 
         console.log(color(`[RecursiveDynamic] 🔄 ENTERING HEDGE MODE. Bidding ${sideToHedge} @ ${state.hedgeTargetPrice}`, COLORS.MAGENTA));
 
@@ -414,11 +426,16 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
     private async resetCycle(state: MarketState) {
         if (state.status !== 'ACTIVE') return;
         
-        // Auto-Sweep previous cycle dust just to be clean and recoup USDC collateral
-        try {
-            await redeemPositions();
-        } catch (e) {
-            // Ignore redeem fail
+        // Auto-Sweep Throttle check (Every 5 mins)
+        const now = Date.now();
+        if (now - this.lastRedeemTs > this.REDEEM_THROTTLE_MS) {
+            try {
+                console.log(color(`[RecursiveDynamic] 🧹 Throttled Redeem starting...`, COLORS.CYAN));
+                await redeemPositions();
+                this.lastRedeemTs = now;
+            } catch (e) {
+                // Ignore redeem fail
+            }
         }
 
         state.roundNumber++;
@@ -430,12 +447,16 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
         state.yesFilled = false;
         state.noFilled = false;
         state.ordersPlaced = false;
+
+        // Reset Tracking Fields
+        state.totalHedgeCostUsd = 0;
+        state.hedgeMatchedSoFar = 0;
+        state.lastReportedMatched = 0;
         
         // Pick new random price
         let roundPrice = this.minPrice + Math.random() * (this.maxPrice - this.minPrice);
         state.roundPrice = Math.floor(roundPrice * 100) / 100;
         state.targetShares = this.calcSizeForPrice(state.roundPrice);
-        state.roundInitialSize = state.targetShares;
 
         this.pnlManager.startCycle(this.COIN, `${state.marketId}-${state.roundNumber}`, state.slug);
         await this.placeDualOrders(state);
@@ -459,10 +480,12 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
         let outcome = "NEUTRAL";
 
         if (state.yesFilled && state.noFilled) {
-            // Unlikely we hit expiration exactly inside HEDGED without checkFills realizing it since it blocks looping.
-            // But if we do, tally it!
             outcome = "HEDGE_SUCCESS_ON_WIRE";
-            const profit = (state.roundInitialSize * (this.targetPairCost - state.roundPrice - (state.hedgeTargetPrice || 0)));
+            
+            const totalRev = (state.targetShares + state.hedgeMatchedSoFar) * this.targetPairCost;
+            const totalCost = ((state.targetShares + state.hedgeMatchedSoFar) * state.roundPrice) + state.totalHedgeCostUsd;
+            const profit = totalRev - totalCost;
+
             this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'WIN', profit);
             this.stats.totalHedges++;
             this.stats.hedgeSuccess++;
@@ -482,7 +505,7 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
             }
             this.stats.neutral++;
             // Mark the failed loop/round as a LOSS
-            this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'LOSS', -(state.roundInitialSize * state.roundPrice));
+            this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'LOSS', -(state.targetShares * state.roundPrice));
         } else {
             // Nothing was filled in the final loop round
             this.pnlManager.closeCycle(`${state.marketId}-${state.roundNumber}`, 'EXPIRED', 0);
@@ -490,9 +513,10 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
 
         console.log(`[RecursiveDynamic] Final result for ${state.slug} (Round ${state.roundNumber}): ${outcome}`);
 
-        console.log(color("🔄 Auto-Redeeming...", COLORS.CYAN));
+        console.log(color("🔄 Mandatory Expiry Redeem...", COLORS.CYAN));
         try {
             await redeemPositions();
+            this.lastRedeemTs = Date.now();
         } catch (e: any) {
             console.error(color(`❌ Auto-Redeem Failed: ${e.message}`, COLORS.RED));
         }
@@ -564,8 +588,10 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
             targetShares: 0,
             roundPrice: 0,
             roundNumber: 1, // Start Round 1
-            roundInitialSize: 0,
-            phase: 'LEG_IN'
+            phase: 'LEG_IN',
+            totalHedgeCostUsd: 0,
+            hedgeMatchedSoFar: 0,
+            lastReportedMatched: 0
         };
 
         this.activeMarkets.set(market.id, state);
@@ -595,7 +621,6 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
         let roundPrice = this.minPrice + Math.random() * (this.maxPrice - this.minPrice);
         state.roundPrice = Math.floor(roundPrice * 100) / 100;
         state.targetShares = this.calcSizeForPrice(state.roundPrice);
-        state.roundInitialSize = state.targetShares;
 
         this.pnlManager.startCycle(this.COIN, `${state.marketId}-${state.roundNumber}`, state.slug);
         await this.placeDualOrders(state);
@@ -627,13 +652,8 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
              return;
         }
 
-        const timeLeft = Math.max(0, (state.endTime - Date.now()) / 1000);
-        // Early in market (300s left), be strict (0.35 skew). Late in market (60s left), be lenient (0.5 skew).
-        const maxSkew = 0.35 + (1 - Math.min(1, timeLeft / 300)) * 0.15; 
-        const actualSkew = Math.abs(yesPx - noPx);
-
-        if (actualSkew > maxSkew) {
-             console.log(color(`[RecursiveDynamic] ⚠️ Momentum skew (${actualSkew.toFixed(2)}) > Threshold (${maxSkew.toFixed(2)}). Stalling for ${state.slug}...`, COLORS.YELLOW));
+        if (Math.abs(yesPx - noPx) > 0.40) {
+             console.log(color(`[RecursiveDynamic] ⚠️ Momentum skew detected (${yesPx}/${noPx}). Stalling Leg-in placement for ${state.slug}...`, COLORS.YELLOW));
              setTimeout(() => { if (state.status === 'ACTIVE' && state.phase === 'LEG_IN') this.placeDualOrders(state).catch(()=>{}) }, 5000);
              return;
         }
@@ -708,7 +728,6 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
         if (this.activeMarkets.size === 0) return;
 
         for (const state of this.activeMarkets.values()) {
-            if (state.status === 'EXPIRED') continue; // Skip ghost markets
             const now = Date.now();
             let timeStr = "";
             let timerColor = COLORS.WHITE;
@@ -746,6 +765,11 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
                 `${posStr} ${phaseStr} ${color(state.slug, COLORS.DIM + COLORS.WHITE)} (Rnd: ${state.roundNumber})`
             );
         }
+    }
+
+    private calcTotalRevenue(state: MarketState): number {
+        const totalShares = state.targetShares + state.hedgeMatchedSoFar;
+        return totalShares * this.targetPairCost;
     }
 
     async cleanup(): Promise<void> {
