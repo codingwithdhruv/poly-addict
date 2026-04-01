@@ -189,17 +189,17 @@ export class Btc5mWickDriftStrategy implements Strategy {
         }
 
         if (state.unwindTriggered) {
-            // Aggressively move the hedge bid towards current mid to break-even
+            // Aggressively move the hedge bid to cross the spread and guarantee execution
             const mid = state.prices.get(state.tokenIds[state.hedgeSide === 'YES' ? 0 : 1]) || 0;
             if (mid > 0) {
-                // Aim for break-even cost (1.00 - leg1 cost)
-                let breakEvenPrice = 0.99 - state.roundPrice;
-                if (breakEvenPrice < 0.05) breakEvenPrice = 0.05;
+                // Bid above midpoint to cross the Ask, up to a max of 0.99
+                let unwindPrice = Math.min(0.99, mid + 0.04);
+                unwindPrice = Math.floor(unwindPrice * 100) / 100;
 
-                // If currently bidding too low, move it up
-                if (state.hedgeTargetPrice < breakEvenPrice - 0.02) {
+                // If currently bidding too low, move it up to the unwind price
+                if (state.hedgeTargetPrice < unwindPrice - 0.01) {
                     await this.cancelOrder(state.hedgeOrderId);
-                    state.hedgeTargetPrice = breakEvenPrice;
+                    state.hedgeTargetPrice = unwindPrice;
                     state.hedgeOrderId = undefined;
                     
                     const tokenIdx = state.hedgeSide === 'YES' ? 0 : 1;
@@ -272,6 +272,16 @@ export class Btc5mWickDriftStrategy implements Strategy {
             if (timeLeft > 150 && state.cycleCount < this.MAX_CYCLES_PER_MARKET) {
                 const waitElapsed = (Date.now() - (state.lastSecuredTs || 0)) / 1000;
                 if (waitElapsed > 10) { // 10s Jitter
+                    // Re-calculate hunter price based on NEW midpoint
+                    const mid = state.prices.get(state.tokenIds[0]) || 0.50;
+                    
+                    // Skew check (80/20 rule): Do not re-enter if market is decisive
+                    if (mid < 0.20 || mid > 0.80) {
+                        console.log(color(`[WickDrift] 🚫 Market ${state.slug} is decisive (${mid.toFixed(2)}). Canceling further cycles.`, COLORS.YELLOW));
+                        state.cycleCount = this.MAX_CYCLES_PER_MARKET; // stop trying
+                        return;
+                    }
+
                     console.log(color(`[WickDrift] 🔄 Market ${state.slug} has ${timeLeft.toFixed(0)}s left. RESETTING FOR CYCLE ${state.cycleCount + 1}...`, COLORS.BRIGHT + COLORS.MAGENTA));
                     
                     state.phase = 'WICK_HUNT';
@@ -285,8 +295,6 @@ export class Btc5mWickDriftStrategy implements Strategy {
                     state.unwindTriggered = false;
                     state.cycleCount++;
 
-                    // Re-calculate hunter price based on NEW midpoint
-                    const mid = state.prices.get(state.tokenIds[0]) || 0.50;
                     state.roundPrice = Math.floor((mid * (1 - this.wickOffsetPct)) * 100) / 100;
 
                     this.placeLegInOrders(state).catch(e => console.error("[WickDrift] Re-entry failed:", e));
@@ -434,6 +442,14 @@ export class Btc5mWickDriftStrategy implements Strategy {
         const avgMid = 0.50; // Assume 0.50 if mid fetching failed
         let mid = state.prices.get(tokenIds[0]) || avgMid;
         
+        // 80/20 Rule: Do not enter if market is decisive
+        if (mid < 0.20 || mid > 0.80) {
+            console.log(color(`[WickDrift] 🚫 Skipping initial entry for ${state.slug} (Market decisive: ${mid.toFixed(2)})`, COLORS.YELLOW));
+            if (this.priceSocket) this.priceSocket.unsubscribe(tokenIds);
+            this.activeMarkets.delete(m.id);
+            return;
+        }
+
         // If user provided a fixed price via --price, use it as the "Wick" buy level
         let hunterPrice = this.minPrice;
         if (this.minPrice === 0.35) { // If default, try to be dynamic
