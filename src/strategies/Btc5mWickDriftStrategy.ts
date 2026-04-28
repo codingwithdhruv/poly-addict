@@ -1,12 +1,13 @@
 import { Strategy } from "./types.js";
-import { ClobClient, Side, OrderType, AssetType } from "@polymarket/clob-client";
+import { ClobClient, Side, OrderType, AssetType } from "@polymarket/clob-client-v2";
 import { GammaClient } from "../clients/gamma-api.js";
 import { PriceSocket } from "../clients/websocket.js";
 import { WeightedStrategyConfig } from "./BaseWeightedStrategy.js";
-export type DipArbConfig = WeightedStrategyConfig;
+export type DipArbConfig = WeightedStrategyConfig & { useBybitFilter?: boolean, bybitInterval?: string };
 import { redeemPositions } from "../scripts/redeem.js";
 import { PriceLogger } from "../lib/priceLogger.js";
 import { PnlManager } from "../lib/pnlManager.js";
+import { BybitConditionTracker } from "../clients/BybitConditionTracker.js";
 
 const COLORS = {
     RESET: "\x1b[0m",
@@ -58,6 +59,7 @@ export class Btc5mWickDriftStrategy implements Strategy {
     private gammaClient: GammaClient;
     private priceSocket?: PriceSocket;
     private pnlManager: PnlManager;
+    private bybitTracker?: BybitConditionTracker;
 
     private readonly MAX_CONCURRENT = 1;
     private readonly MAX_CYCLES_PER_MARKET = 3; // [NEW] Stop after X snipes
@@ -102,12 +104,24 @@ export class Btc5mWickDriftStrategy implements Strategy {
             }
         }
         if (config?.cooldownMinutes) this.COOLDOWN_MS = config.cooldownMinutes * 60 * 1000;
+        
+        if (config?.useBybitFilter) {
+            this.bybitTracker = new BybitConditionTracker({
+                symbol: "BTCUSDT",
+                interval: config.bybitInterval || "5"
+            });
+        }
     }
 
     async init(clobClient: ClobClient): Promise<void> {
         this.clobClient = clobClient;
         const sizeDesc = this.tradeShares > 0 ? `${this.tradeShares} shares` : `$${this.tradeSizeUsd}/side`;
         console.log(`[WickDrift] Init: Hunter Mode (Target Profit: $${this.targetProfitUsd} per share)`);
+        
+        if (this.bybitTracker) {
+            console.log(`[WickDrift] Initializing Bybit Condition Tracker...`);
+            await this.bybitTracker.init();
+        }
     }
 
     async run(): Promise<void> {
@@ -116,6 +130,7 @@ export class Btc5mWickDriftStrategy implements Strategy {
             await redeemPositions();
         } catch (e) {}
 
+        // Standard maintenance loop
         this.loopInterval = setInterval(async () => {
             if (this.destroyed) return;
             try {
@@ -124,6 +139,15 @@ export class Btc5mWickDriftStrategy implements Strategy {
                 console.error("[WickDrift] Loop Error:", e);
             }
         }, 5000);
+
+        // [NEW] Regular Redemption Heartbeat (Every 5 minutes)
+        setInterval(async () => {
+            if (this.destroyed) return;
+            try {
+                console.log(color("[WickDrift] ⚡ Periodic Auto-Redeem check...", COLORS.DIM + COLORS.CYAN));
+                await redeemPositions();
+            } catch (e) {}
+        }, 300000);
 
         this.findAndJoinMarket();
     }
@@ -282,6 +306,13 @@ export class Btc5mWickDriftStrategy implements Strategy {
                         return;
                     }
 
+                    // Bybit Trend check: Do not re-enter if breaking out
+                    if (this.bybitTracker && !this.bybitTracker.isConsolidating()) {
+                        console.log(color(`[WickDrift] 🚫 Market ${state.slug} is in a breakout trend. Canceling further cycles.`, COLORS.YELLOW));
+                        state.cycleCount = this.MAX_CYCLES_PER_MARKET;
+                        return;
+                    }
+
                     console.log(color(`[WickDrift] 🔄 Market ${state.slug} has ${timeLeft.toFixed(0)}s left. RESETTING FOR CYCLE ${state.cycleCount + 1}...`, COLORS.BRIGHT + COLORS.MAGENTA));
                     
                     state.phase = 'WICK_HUNT';
@@ -382,6 +413,11 @@ export class Btc5mWickDriftStrategy implements Strategy {
             const ts = currentSlot + (i * interval);
             const slug = `${this.COIN.toLowerCase()}-updown-5m-${ts}`;
             if (Array.from(this.activeMarkets.values()).some(m => m.slug === slug)) continue;
+
+            // Optional: Skip scanning completely if we are trending hard (save API calls)
+            if (this.bybitTracker && !this.bybitTracker.isConsolidating()) {
+                return; // Early return, don't hunt at all
+            }
 
             try {
                 const results = await this.gammaClient.getMarkets(`slug=${slug}`);
@@ -561,5 +597,6 @@ export class Btc5mWickDriftStrategy implements Strategy {
     async cleanup() {
         if (this.loopInterval) clearInterval(this.loopInterval);
         if (this.priceSocket) this.priceSocket.close();
+        if (this.bybitTracker) this.bybitTracker.close();
     }
 }

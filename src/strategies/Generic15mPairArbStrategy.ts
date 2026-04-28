@@ -1,5 +1,5 @@
 import { Strategy } from "./types.js";
-import { ClobClient, Side, AssetType } from "@polymarket/clob-client";
+import { ClobClient, Side, AssetType } from "@polymarket/clob-client-v2";
 import { PriceSocket, PriceUpdate } from "../clients/websocket.js";
 import { GammaClient } from "../clients/gamma-api.js";
 import { PnlManager } from "../lib/pnlManager.js";

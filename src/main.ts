@@ -13,6 +13,7 @@ import { Btc5mNoiseReversionStrategy } from "./strategies/Btc5mNoiseReversionStr
 import { Btc5mRecursiveDynamicHedgeStrategy } from "./strategies/Btc5mRecursiveDynamicHedgeStrategy.js";
 import { Btc15mExtremeMeanReversionStrategy } from "./strategies/Btc15mExtremeMeanReversionStrategy.js";
 import { redeemPositions } from "./scripts/redeem.js";
+import { SessionLogger } from "./lib/sessionLogger.js";
 import dns from 'dns';
 import http from 'http';
 import https from 'https';
@@ -23,7 +24,27 @@ dns.setDefaultResultOrder('ipv4first');
 // Strengthen IPv4 force for Axios/HTTP
 http.globalAgent = new http.Agent({ family: 4 });
 https.globalAgent = new https.Agent({ family: 4 });
+// Suppress Axios/CLOB Client massive JSON error noise
+const originalConsoleError = console.error;
+console.error = (...args: any[]) => {
+    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    if (msg.includes('[CLOB Client]') || msg.includes('not enough balance') || msg.includes('request error')) {
+        if (msg.includes('not enough balance')) {
+             originalConsoleError(`\x1b[31m[Strategy Warning]\x1b[0m Insufficient collateral balance.`);
+        }
+        return;
+    }
+    originalConsoleError.apply(console, args);
+};
 
+const originalConsoleLog = console.log;
+console.log = (...args: any[]) => {
+    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    if (msg.includes('[CLOB Client]') || msg.includes('request error')) {
+        return;
+    }
+    originalConsoleLog.apply(console, args);
+};
 // --- UI Helpers for Dashboard ---
 const COLORS = {
     RESET: "\x1b[0m",
@@ -227,6 +248,7 @@ async function main() {
     } else {
         strategy = new Generic15mDipArbStrategy(args);
     }
+    SessionLogger.init(strategy.name || args.strategy || 'default', args);
 
     // 4. Bot
     const config: BotConfig = {

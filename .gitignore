@@ -100,3 +100,8 @@ coverage/
 .parcel-cache/
 .turbo/
 .next/
+
+# Unnecessary / Temp Files
+bybit-exchange.github.io_docs_v5_ws_connect.2026-03-24T15_50_06.566Z.md
+check_tx.ts
+polymarketV2Docs.md

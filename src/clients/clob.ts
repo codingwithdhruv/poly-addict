@@ -1,4 +1,4 @@
-import { ClobClient } from "@polymarket/clob-client";
+import { ClobClient } from "@polymarket/clob-client-v2";
 import { Wallet } from "ethers";
 import { CONFIG } from "./config.js";
 
@@ -15,7 +15,7 @@ export async function createClobClient(): Promise<ClobClient> {
     console.log(`[ClobClient] Initializing for address: ${signer.address}`);
 
     // same logic as poly-all-in-one: Init with L1 to get creds, then L2
-    const tempClient = new ClobClient(CONFIG.HOST, chainId, signer);
+    const tempClient = new ClobClient({ host: CONFIG.HOST, chain: chainId, signer });
     let apiCreds;
 
     try {
@@ -33,21 +33,23 @@ export async function createClobClient(): Promise<ClobClient> {
     if (proxyAddress) {
         console.log(`[ClobClient] Using Proxy Address: ${proxyAddress} (SignatureType=2)`);
         // Gnosis Safe / Proxy Usage
-        return new ClobClient(
-            CONFIG.HOST,
-            chainId,
+        return new ClobClient({
+            host: CONFIG.HOST,
+            chain: chainId,
             signer,
-            apiCreds,
-            2, // SignatureType.GnosisSafe (using const to avoid import issues for now)
-            proxyAddress
-        );
+            creds: apiCreds,
+            signatureType: 2, // SignatureType.GnosisSafe
+            funderAddress: proxyAddress,
+            builderConfig: { builderCode: CONFIG.POLY_BUILDER_CODE }
+        });
     }
 
     // Standard EOA Usage
-    return new ClobClient(
-        CONFIG.HOST,
-        chainId,
+    return new ClobClient({
+        host: CONFIG.HOST,
+        chain: chainId,
         signer,
-        apiCreds
-    );
+        creds: apiCreds,
+        builderConfig: { builderCode: CONFIG.POLY_BUILDER_CODE }
+    });
 }

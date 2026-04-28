@@ -1,12 +1,13 @@
 
 import { Strategy } from "./types.js";
-import { ClobClient, Side, OrderType } from "@polymarket/clob-client";
+import { ClobClient, Side, OrderType } from "@polymarket/clob-client-v2";
 import { GammaClient } from "../clients/gamma-api.js";
 import { PriceSocket } from "../clients/websocket.js";
 import { WeightedStrategyConfig } from "./BaseWeightedStrategy.js";
 export type DipArbConfig = WeightedStrategyConfig;
 import { redeemPositions } from "../scripts/redeem.js";
 import { SideInput } from "../config/args.js";
+import { PriceLogger } from "../lib/priceLogger.js";
 
 // --- UI / ANSI Helpers ---
 const COLORS = {
@@ -373,6 +374,8 @@ export class Btc15mExtremeMeanReversionStrategy implements Strategy {
         for (const s of this.activeMarkets.values()) {
             if (s.tokenIds.includes(tokenId)) {
                 s.prices.set(tokenId, price);
+                const isYes = tokenId === s.tokenIds[0];
+                PriceLogger.log(s.slug, tokenId, isYes ? 'YES' : 'NO', price);
                 break;
             }
         }

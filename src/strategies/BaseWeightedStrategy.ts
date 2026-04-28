@@ -1,5 +1,5 @@
 import { Strategy } from "./types.js";
-import { ClobClient, Side, AssetType } from "@polymarket/clob-client";
+import { ClobClient, Side, AssetType } from "@polymarket/clob-client-v2";
 import { GammaClient } from "../clients/gamma-api.js";
 import { PriceSocket, PriceUpdate } from "../clients/websocket.js";
 import { PnlManager } from "../lib/pnlManager.js";
@@ -137,6 +137,8 @@ export interface WeightedStrategyConfig {
     side?: 'YES' | 'NO' | 'BOTH';
     cooldownMinutes?: number;
     strategy?: string;
+    useBybitFilter?: boolean;
+    bybitInterval?: string;
 }
 
 /**
@@ -670,7 +672,7 @@ export abstract class BaseWeightedStrategy implements Strategy {
             const noAvg = state.position.no.totalShares > 0 ? state.position.no.avgPrice.toFixed(3) : "0.000";
             const totalSpent = state.position.yes.totalCost + state.position.no.totalCost;
 
-            console.log(`${color("[STATUS]", COLORS.CYAN)} Time: ${timeLeft}s | Px: ${p1}/${p2} | Pos: [Y:${yesAvg} (${state.position.yes.totalShares})] [N:${noAvg} (${state.position.no.totalShares})] Exp:$${totalSpent.toFixed(2)}`);
+            console.log(`${color("[STATUS]", COLORS.CYAN)} Time: ${timeLeft}s | Px: ${color(p1, COLORS.GREEN)}/${color(p2, COLORS.RED)} | Pos: [Y:${color(yesAvg, COLORS.GREEN)} (${state.position.yes.totalShares})] [N:${color(noAvg, COLORS.RED)} (${state.position.no.totalShares})] Exp:$${totalSpent.toFixed(2)}`);
         }
     }
 

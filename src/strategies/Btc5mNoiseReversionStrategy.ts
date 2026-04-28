@@ -1,5 +1,5 @@
 import { Strategy } from "./types.js";
-import { ClobClient, Side } from "@polymarket/clob-client";
+import { ClobClient, Side } from "@polymarket/clob-client-v2";
 import { GammaClient } from "../clients/gamma-api.js";
 import { PriceSocket } from "../clients/websocket.js";
 import { WeightedStrategyConfig } from "./BaseWeightedStrategy.js";
@@ -343,12 +343,16 @@ export class Btc5mNoiseReversionStrategy implements Strategy {
             const p1 = s.yesHistory.length > 0 ? s.yesHistory[s.yesHistory.length - 1].toFixed(2) : "?.??";
             const p2 = s.noHistory.length > 0 ? s.noHistory[s.noHistory.length - 1].toFixed(2) : "?.??";
 
-            const yStatus = s.yesPositionShares > 0 ? color("HOLD", COLORS.CYAN) : (s.yesOrderId ? "BID" : "IDLE");
-            const nStatus = s.noPositionShares > 0 ? color("HOLD", COLORS.CYAN) : (s.noOrderId ? "BID" : "IDLE");
+            const yStatus = s.yesPositionShares > 0 
+                ? color(`🟢 HOLD (${s.yesPositionShares}s)`, COLORS.GREEN) 
+                : (s.yesOrderId ? color(`⏳ BID ($${s.yesLimitOrderPrice})`, COLORS.YELLOW) : "⚪ IDLE");
+            const nStatus = s.noPositionShares > 0 
+                ? color(`🟢 HOLD (${s.noPositionShares}s)`, COLORS.GREEN) 
+                : (s.noOrderId ? color(`⏳ BID ($${s.noLimitOrderPrice})`, COLORS.YELLOW) : "⚪ IDLE");
 
             console.log(
-                `${color("[REVERSION]", COLORS.YELLOW)} | Px: ${p1}/${p2} | ` +
-                `Y: ${yStatus} (Lmt:${s.yesLimitOrderPrice}) N: ${nStatus} (Lmt:${s.noLimitOrderPrice}) | ` +
+                `${color("[REVERSION]", COLORS.YELLOW)} | Px: ${color(p1, COLORS.GREEN)}/${color(p2, COLORS.RED)} | ` +
+                `Y: ${yStatus} | N: ${nStatus} | ` +
                 color(s.slug, COLORS.DIM + COLORS.WHITE)
             );
         }

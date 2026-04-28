@@ -1,6 +1,6 @@
 
 import { Strategy } from "./types.js";
-import { ClobClient, Side, OrderType, AssetType } from "@polymarket/clob-client";
+import { ClobClient, Side, OrderType, AssetType } from "@polymarket/clob-client-v2";
 import { GammaClient } from "../clients/gamma-api.js";
 import { PriceSocket } from "../clients/websocket.js";
 import { WeightedStrategyConfig } from "./BaseWeightedStrategy.js";

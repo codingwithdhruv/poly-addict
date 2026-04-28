@@ -28,14 +28,24 @@ export class GammaClient {
 
     async getMarkets(queryParams: string): Promise<any[]> {
         const url = `${GAMMA_API_URL}/markets?${queryParams}`;
-        console.log(`Fetching Gamma Markets: ${url}`);
         const response = await fetch(url, { signal: (AbortSignal as any).timeout(10000) });
         if (!response.ok) {
-            // 404 is common if the predictive slug doesn't exist yet
             if (response.status === 404) return [];
             throw new Error(`Gamma API Error: ${response.status} ${response.statusText}`);
         }
         return await response.json();
+    }
+
+    async getMarketMetadata(conditionId: string): Promise<any | null> {
+        // Gamma can search markets by condition_id directly
+        const markets = await this.getMarkets(`condition_id=${conditionId}`);
+        return markets.length > 0 ? markets[0] : null;
+    }
+
+    async getMarketByTokenId(tokenId: string): Promise<any | null> {
+        // Gamma can search markets by token ID directly
+        const markets = await this.getMarkets(`clob_token_ids=${tokenId}`);
+        return markets.length > 0 ? markets[0] : null;
     }
 
     async getCrypto15MinMarkets(): Promise<string[]> {

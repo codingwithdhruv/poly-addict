@@ -1,10 +1,11 @@
 import { ethers, Contract, Wallet } from 'ethers';
 import { CONFIG } from './config.js';
 
+
 // ===== Contract Addresses (Polygon Mainnet) =====
 
 export const CTF_CONTRACT = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
-export const USDC_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; // USDC.e
+export const USDC_CONTRACT = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB'; // pUSD
 export const MULTISEND_CONTRACT = '0x40A2aCCbd92BCA938b02010E17A5b8929b49130D'; // Proxy MultiSend mapping
 export const USDC_DECIMALS = 6;
 
@@ -17,6 +18,8 @@ const CTF_ABI = [
     'function balanceOf(address account, uint256 positionId) view returns (uint256)',
     'function payoutNumerators(bytes32 conditionId, uint256 outcomeIndex) view returns (uint256)',
     'function payoutDenominator(bytes32 conditionId) view returns (uint256)',
+    'event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)',
+    'event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)',
 ];
 
 const ERC20_ABI = [
@@ -34,8 +37,8 @@ const GNOSIS_SAFE_ABI = [
 // ===== Types =====
 
 export interface TokenIds {
-    yesTokenId: string;
-    noTokenId: string;
+    yesTokenId?: string;
+    noTokenId?: string;
 }
 
 export interface RedeemResult {
@@ -54,12 +57,10 @@ export interface MarketResolution {
     payoutDenominator: number;
 }
 
-export interface PositionBalance {
+export interface ConditionBalance {
     conditionId: string;
-    yesBalance: string;
-    noBalance: string;
-    yesPositionId: string;
-    noPositionId: string;
+    balances: string[]; // Ordered by outcome index
+    tokenIds: string[]; // Ordered by outcome index
 }
 
 // ===== CTF Client =====
@@ -76,38 +77,82 @@ export class CTFClient {
     private usdcContract: Contract;
 
     constructor() {
-        this.provider = new ethers.providers.JsonRpcProvider(CONFIG.RPC_URL);
+        // Explicitly set chainID 137 (Polygon) to avoid auto-detection failure in strict environments
+        this.provider = new ethers.providers.JsonRpcProvider(CONFIG.RPC_URLS[0] || CONFIG.RPC_URL, CONFIG.CHAIN_ID || 137);
         this.wallet = new Wallet(CONFIG.PRIVATE_KEY, this.provider);
         this.ctfContract = new Contract(CTF_CONTRACT, CTF_ABI, this.wallet);
         this.usdcContract = new Contract(USDC_CONTRACT, ERC20_ABI, this.wallet);
+
     }
 
     getAddress(): string {
         return this.wallet.address;
     }
 
+    /**
+     * Executes a batch of transactions using the official Builder Relayer SDK.
+     * This handles MultiSend bundling and signing automatically.
+     */
+    async executeBuilderBatch(txns: { to: string; data: string; value: string }[]): Promise<boolean> {
+        console.log(`[BuilderBatch] Forwarding ${txns.length} transactions to executeV2Relayer...`);
+        return this.executeV2Relayer(txns);
+    }
+
     async getMarketResolution(conditionId: string): Promise<MarketResolution> {
-        const [yesNumerator, noNumerator, denominator] = await Promise.all([
-            this.ctfContract.payoutNumerators(conditionId, 0),
-            this.ctfContract.payoutNumerators(conditionId, 1),
-            this.ctfContract.payoutDenominator(conditionId),
-        ]);
+        let denominator = ethers.BigNumber.from(0);
+        const payouts: any[] = [];
+        
+        try {
+            denominator = await this.ctfContract.payoutDenominator(conditionId);
+            const isResolved = denominator.gt(0);
+            
+            if (isResolved) {
+                // Check up to 10 outcomes sequentially to avoid revert-on-parallel
+                for (let i = 0; i < 10; i++) {
+                    try {
+                        const p = await this.ctfContract.payoutNumerators(conditionId, i);
+                        payouts.push(p);
+                    } catch (e) {
+                        break; // Index out of bounds or other failure
+                    }
+                }
+            }
+        } catch (e: any) {
+            console.error(`[CTFClient] Failed to check resolution: ${e.message}`);
+        }
 
         const isResolved = denominator.gt(0);
-        let winningOutcome: 'YES' | 'NO' | undefined;
+        let winningOutcome: string | undefined;
 
-        if (isResolved) {
-            if (yesNumerator.gt(0) && noNumerator.eq(0)) winningOutcome = 'YES';
-            else if (noNumerator.gt(0) && yesNumerator.eq(0)) winningOutcome = 'NO';
+        if (isResolved && payouts.length > 0) {
+            const winIdx = payouts.findIndex(p => p.gt(0));
+            if (winIdx !== -1) {
+                winningOutcome = `OUTCOME_${winIdx}`;
+                if (winIdx === 0) winningOutcome = 'YES';
+                else if (winIdx === 1) winningOutcome = 'NO';
+            }
         }
 
         return {
             conditionId,
             isResolved,
             winningOutcome,
-            payoutNumerators: [yesNumerator.toNumber(), noNumerator.toNumber()],
-            payoutDenominator: denominator.toNumber(),
+            payoutNumerators: payouts.slice(0, 2).map(p => (p as any).toNumber()) as [number, number],
+            payoutDenominator: (denominator as any).toNumber(),
         };
+    }
+
+    /**
+     * Helper to generate index sets for up to N outcomes.
+     * indexSets[i] = 1 << i.
+     * Standard Polymarket binary markets use [1, 2].
+     */
+    getIndexSets(count: number = 2): number[] {
+        const sets: number[] = [];
+        for (let i = 0; i < count; i++) {
+            sets.push(1 << i);
+        }
+        return sets;
     }
 
 
@@ -139,7 +184,8 @@ export class CTFClient {
      * Combines >1 transactions natively using Gnosis MultiSend struct.
      */
     async executeV2Relayer(txs: { to: string; data: string; value: string; }[]): Promise<boolean> {
-        if (!CONFIG.RELAYER_API_KEY || !CONFIG.RELAYER_API_KEY_ADDRESS || !CONFIG.POLY_PROXY_ADDRESS) {
+        const credsList = CONFIG.RELAYER_CREDS_LIST || [];
+        if (credsList.length === 0 || !CONFIG.POLY_PROXY_ADDRESS) {
             console.warn("⚠️ Relayer V2 Config Incomplete. Falling back to EOA direct.");
             return false; 
         }
@@ -204,26 +250,51 @@ export class CTFClient {
                 metadata: ""
             };
 
-            console.log(`[RelayerV2] Submitting gasless tx (${i+1}/${finalTxs.length}) for ${proxyWallet}...`);
-            const response = await fetch("https://relayer-v2.polymarket.com/submit", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "RELAYER_API_KEY": CONFIG.RELAYER_API_KEY,
-                    "RELAYER_API_KEY_ADDRESS": CONFIG.RELAYER_API_KEY_ADDRESS
-                },
-                body: JSON.stringify(payload)
-            });
+            let txSuccess = false;
 
-            if (!response.ok) {
-                const text = await response.text();
-                console.error(`❌ Relayer V2 Error (${response.status}):`, text);
+            console.log(`[RelayerV2] Submitting gasless tx (${i+1}/${finalTxs.length}) for ${proxyWallet}...`);
+            
+            for (let j = 0; j < credsList.length; j++) {
+                const currentCreds = credsList[j];
+
+                try {
+                    const response = await fetch("https://relayer-v2.polymarket.com/submit", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "RELAYER_API_KEY": currentCreds.key,
+                            "RELAYER_API_KEY_ADDRESS": currentCreds.address
+                        },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.ok) {
+                        const resData = await response.json() as any;
+                        console.log(`✅ Relayer V2 Registered using API Key Address ${currentCreds.address}: ID ${resData.transactionID || resData.id}`);
+                        txSuccess = true;
+                        break; 
+                    } else {
+                        const text = await response.text();
+                        console.warn(`⚠️ Relayer API Key Address ${currentCreds.address} Error (${response.status}): ${text}`);
+
+                        if (response.status === 429 || text.includes("quota exceeded")) {
+                            console.warn(`⚠️ Rate limit exhausted for API Key address: ${currentCreds.address}. Rotating...`);
+                            continue; 
+                        } else {
+                            console.error(`❌ Non-rate-limit failure. Stopping.`);
+                            txSuccess = false;
+                            break;
+                        }
+                    }
+                } catch (e: any) {
+                    console.error(`❌ Fetch failure for Key Address ${currentCreds.address}: ${e.message}`);
+                }
+            }
+
+            if (!txSuccess) {
                 totalSuccess = false;
                 break;
             }
-            
-            const resData = await response.json() as any;
-            console.log(`✅ Relayer V2 Registered: ID ${resData.transactionID || resData.id}`);
             
             if (i < finalTxs.length - 1) await new Promise(r => setTimeout(r, 2000));
         }
@@ -321,6 +392,7 @@ export class CTFClient {
         const res = await this.getMarketResolution(conditionId);
         if (!res.isResolved) throw new Error('Market not resolved');
 
+        // Standard Polymarket binary markets use indexSets [1, 2].
         const indexSets = [1, 2];
         const data = this.ctfContract.interface.encodeFunctionData("redeemPositions", [USDC_CONTRACT, ethers.constants.HashZero, conditionId, indexSets]);
 
@@ -339,14 +411,105 @@ export class CTFClient {
         return { success: true, txHash, outcome: outcome || res.winningOutcome || "UNKNOWN", tokensRedeemed: "0", usdcReceived: "0" };
     }
 
-    getMergeTransaction(conditionId: string, amount: string): { to: string; data: string; value: string } {
+    /**
+     * Get a transaction object for merging a full set of outcome tokens back into USDC.e.
+     */
+    getMergeTransaction(conditionId: string, outcomeCount: number, amount: string): { to: string; data: string; value: string } {
         const amountWei = ethers.utils.parseUnits(amount, USDC_DECIMALS);
-        const data = this.ctfContract.interface.encodeFunctionData("mergePositions", [USDC_CONTRACT, ethers.constants.HashZero, conditionId, [1, 2], amountWei]);
+        const indexSets = this.getIndexSets(outcomeCount);
+        const data = this.ctfContract.interface.encodeFunctionData("mergePositions", [USDC_CONTRACT, ethers.constants.HashZero, conditionId, indexSets, amountWei]);
         return { to: CTF_CONTRACT, data, value: "0" };
     }
 
-    getRedeemTransaction(conditionId: string): { to: string; data: string; value: string } {
-        const data = this.ctfContract.interface.encodeFunctionData("redeemPositions", [USDC_CONTRACT, ethers.constants.HashZero, conditionId, [1, 2]]);
+    /**
+     * Get a transaction object for redeeming winning tokens for a condition.
+     */
+    getRedeemTransaction(conditionId: string, outcomeCount: number): { to: string; data: string; value: string } {
+        const indexSets = this.getIndexSets(outcomeCount);
+        const data = this.ctfContract.interface.encodeFunctionData("redeemPositions", [USDC_CONTRACT, ethers.constants.HashZero, conditionId, indexSets]);
         return { to: CTF_CONTRACT, data, value: "0" };
+    }
+
+    /**
+     * Fetch balances for multiple token IDs (positions) for a specific user.
+     */
+    async getBalancesByTokenIds(conditionId: string, tokenIds: string[], userAddress: string): Promise<ConditionBalance> {
+        const balances = await Promise.all(
+            tokenIds.map(id => id ? this.ctfContract.balanceOf(userAddress, id) : ethers.BigNumber.from(0))
+        );
+
+        return {
+            conditionId,
+            balances: balances.map(b => ethers.utils.formatUnits(b, USDC_DECIMALS)),
+            tokenIds
+        };
+    }
+
+    /**
+     * Merge all outcomes for a condition.
+     */
+    async mergeByTokenIds(conditionId: string, tokenIds: string[], amount: string, isProxy: boolean = false): Promise<RedeemResult> {
+        const amountWei = ethers.utils.parseUnits(amount, USDC_DECIMALS);
+        const indexSets = this.getIndexSets(tokenIds.length);
+        const data = this.ctfContract.interface.encodeFunctionData("mergePositions", [USDC_CONTRACT, ethers.constants.HashZero, conditionId, indexSets, amountWei]);
+
+        let txHash = "";
+        if (isProxy) {
+            const success = await this.executeV2Relayer([{ to: CTF_CONTRACT, data, value: "0" }]);
+            if (!success) throw new Error("Relayer V2 merge failed");
+            txHash = "submitted_via_relayer";
+        } else {
+            const gasPrice = await this.provider.getGasPrice();
+            const tx = await this.ctfContract.mergePositions(USDC_CONTRACT, ethers.constants.HashZero, conditionId, indexSets, amountWei, { gasPrice: gasPrice.mul(15).div(10) });
+            const receipt = await tx.wait();
+            txHash = receipt.transactionHash;
+        }
+
+        return { success: true, txHash, outcome: "MERGE", tokensRedeemed: amount, usdcReceived: amount };
+    }
+
+    /**
+     * Redeem all outcomes for a condition.
+     */
+    async redeemByTokenIds(conditionId: string, tokenIds: string[], isProxy: boolean = false): Promise<RedeemResult> {
+        const res = await this.getMarketResolution(conditionId);
+        if (!res.isResolved) throw new Error('Market not resolved');
+
+        const indexSets = this.getIndexSets(tokenIds.length);
+        const data = this.ctfContract.interface.encodeFunctionData("redeemPositions", [USDC_CONTRACT, ethers.constants.HashZero, conditionId, indexSets]);
+
+        let txHash = "";
+        if (isProxy) {
+            const success = await this.executeV2Relayer([{ to: CTF_CONTRACT, data, value: "0" }]);
+            if (!success) throw new Error("Relayer V2 submission failed");
+            txHash = "submitted_via_relayer";
+        } else {
+            const gasPrice = await this.provider.getGasPrice();
+            const tx = await this.ctfContract.redeemPositions(USDC_CONTRACT, ethers.constants.HashZero, conditionId, indexSets, { gasPrice: gasPrice.mul(15).div(10) });
+            const receipt = await tx.wait();
+            txHash = receipt.transactionHash;
+        }
+
+        return { success: true, txHash, outcome: res.winningOutcome || "UNKNOWN", tokensRedeemed: "0", usdcReceived: "0" };
+    }
+
+    /**
+     * Scan recent blockchain history for TransferSingle events to the user's address.
+     * This is the source of truth for all positions ever held.
+     */
+    async getHistoricalTokenIds(userAddress: string, blockCount: number = 20000, externalProvider?: ethers.providers.Provider): Promise<string[]> {
+        const provider = externalProvider || this.provider;
+        const currentBlock = await provider.getBlockNumber();
+        const startBlock = Math.max(0, currentBlock - blockCount);
+
+        console.log(`[CTFClient] Scanning blocks ${startBlock} to ${currentBlock} on provider ${externalProvider ? 'CUSTOM' : 'DEFAULT'}...`);
+        
+        const filter = this.ctfContract.filters.TransferSingle(null, null, userAddress);
+        const logs = await this.ctfContract.connect(provider).queryFilter(filter, startBlock, currentBlock);
+        
+        // Extract unique IDs
+        const ids = [...new Set(logs.map(l => (l as any).args.id.toString()))];
+        console.log(`[CTFClient] Found ${ids.length} unique historical token IDs.`);
+        return ids;
     }
 }

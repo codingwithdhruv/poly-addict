@@ -21,6 +21,8 @@ interface CliArgs {
     limitPrice?: number | string;   // [NEW] Fixed price for Simple Hedge
     cooldownMinutes?: number; // [NEW] Dynamic cooldown for Simple Hedge
     side?: SideInput; // [NEW] Side for MeanReversion
+    useBybitFilter?: boolean;
+    bybitInterval?: string;
 }
 
 function isWeekendLowVolIST(): boolean {
@@ -221,6 +223,8 @@ export function parseCliArgs(): DipArbConfig {
             }
             return val;
         })(),
+        useBybitFilter: getBoolArg('use-bybit-filter', false),
+        bybitInterval: getStringArg('bybit-interval', '5'),
         cooldownMinutes: getArgValue('cooldown', 10), // Default 10m
         side: (() => {
             let val = getStringArg('side', 'BOTH').toUpperCase();

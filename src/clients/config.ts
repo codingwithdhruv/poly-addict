@@ -25,62 +25,44 @@ const getRpcUrls = (): string[] => {
     return urls;
 }
 
-export interface BuilderCreds {
+export interface RelayerCreds {
     key: string;
-    secret: string;
-    passphrase: string;
+    address: string;
 }
 
-const getBuilderCreds = (): BuilderCreds[] => {
-    const creds: BuilderCreds[] = [];
-
-    const tryAdd = (k?: string, s?: string, p?: string) => {
-        if (k && s && p) {
-            // Avoid duplicates? Simple check might be good, but assuming envs are distinct sets
-            // We just push.
-            creds.push({ key: k, secret: s, passphrase: p });
+const getRelayerCreds = (): RelayerCreds[] => {
+    const creds: RelayerCreds[] = [];
+    const tryAdd = (k?: string, a?: string) => {
+        if (k && a && !creds.some(c => c.key === k)) {
+            creds.push({ key: k, address: a });
         }
     };
 
-    // Primary (Legacy or Base 'apiKey')
-    // We try all primary variants
-    const k1 = process.env.POLY_BUILDER_API_KEY || process.env.BUILDER_API_KEY || process.env.apiKey || process.env.apiKey1;
-    const s1 = process.env.POLY_BUILDER_SECRET || process.env.BUILDER_SECRET || process.env.apiSecret || process.env.apiSecret1;
-    const p1 = process.env.POLY_BUILDER_PASSPHRASE || process.env.BUILDER_PASS_PHRASE || process.env.apiPassphrase || process.env.apiPassphrase1;
+    // Try formats like RELAYER_API_KEY & 1RELAYER_API_KEY
+    tryAdd(process.env.RELAYER_API_KEY, process.env.RELAYER_API_KEY_ADDRESS);
+    tryAdd(process.env['1RELAYER_API_KEY'], process.env['1RELAYER_API_KEY_ADDRESS']);
 
-    tryAdd(k1, s1, p1);
-
-    // Secondaries (2 to 5)
-    for (let i = 2; i <= 5; i++) {
-        const k = process.env[`POLY_BUILDER_API_KEY_${i}`] || process.env[`BUILDER_API_KEY_${i}`] || process.env[`apiKey${i}`];
-        const s = process.env[`POLY_BUILDER_SECRET_${i}`] || process.env[`BUILDER_SECRET_${i}`] || process.env[`apiSecret${i}`];
-        const p = process.env[`POLY_BUILDER_PASSPHRASE_${i}`] || process.env[`BUILDER_PASS_PHRASE_${i}`] || process.env[`apiPassphrase${i}`];
-
-        tryAdd(k, s, p);
+    for (let i = 2; i <= 10; i++) {
+        tryAdd(process.env[`RELAYER_API_KEY_${i}`], process.env[`RELAYER_API_KEY_ADDRESS_${i}`]);
+        tryAdd(process.env[`${i}RELAYER_API_KEY`], process.env[`${i}RELAYER_API_KEY_ADDRESS`]);
     }
 
     return creds;
-}
+};
 
 export const CONFIG = {
     HOST: "https://clob.polymarket.com",
     RELAYER_URL: "https://relayer-v2.polymarket.com/",
     CHAIN_ID: 137, // Polygon mainnet
-    RPC_URL: process.env.RPC_URL || "", // Legacy single URL accessor, potentially empty if only indexed used
+    RPC_URL: process.env.RPC_URL || "", 
     RPC_URLS: getRpcUrls(),
     PRIVATE_KEY: getEnvParam("PRIVATE_KEY"),
-
-    // Legacy accessors
-    POLY_BUILDER_API_KEY: process.env.POLY_BUILDER_API_KEY || getEnvParam("BUILDER_API_KEY"),
-    POLY_BUILDER_SECRET: process.env.POLY_BUILDER_SECRET || getEnvParam("BUILDER_SECRET"),
-    POLY_BUILDER_PASSPHRASE: process.env.POLY_BUILDER_PASSPHRASE || getEnvParam("BUILDER_PASS_PHRASE"),
-
-    // New list
-    BUILDER_CREDS_LIST: getBuilderCreds(),
 
     // Relayer V2 Auth
     RELAYER_API_KEY: process.env.RELAYER_API_KEY || "",
     RELAYER_API_KEY_ADDRESS: process.env.RELAYER_API_KEY_ADDRESS || "",
+    RELAYER_CREDS_LIST: getRelayerCreds(),
+    POLY_BUILDER_CODE: process.env.POLY_BUILDER_CODE || process.env.BUILDER_CODE || "",
 
     // Optional: Proxy / Gnosis Safe Configuration
     // If set, the bot will act as this proxy address
@@ -104,7 +86,7 @@ export const getRpcProvider = () => {
 };
 
 export const getUsdcContract = () => {
-    const usdcAddr = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // Polygon USDC.e
+    const usdcAddr = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"; // Polygon pUSD
     const abi = ["function balanceOf(address) view returns (uint256)"];
     return new ethers.Contract(usdcAddr, abi, getRpcProvider());
 };
