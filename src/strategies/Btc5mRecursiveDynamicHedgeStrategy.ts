@@ -1,6 +1,6 @@
 import { Strategy } from "./types.js";
-import { ClobClient, Side, OrderType, AssetType } from "@polymarket/clob-client-v2";
-import { GammaClient } from "../clients/gamma-api.js";
+import { ClobClient, Side, OrderType, AssetType } from "../clients/clob.js";
+import { GammaClient, getOutcomeAssetIds } from "../clients/gamma-api.js";
 import { PriceSocket } from "../clients/websocket.js";
 import { WeightedStrategyConfig } from "./BaseWeightedStrategy.js";
 export type DipArbConfig = WeightedStrategyConfig;
@@ -118,6 +118,7 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
 
     async init(clobClient: ClobClient): Promise<void> {
         this.clobClient = clobClient;
+        this.priceSocket.setClient(clobClient);
         const sizeDesc = this.tradeShares > 0 ? `${this.tradeShares} shares` : `$${this.tradeSizeUsd}/side`;
         console.log(`[RecursiveDynamicHedge] Init: Max ${this.MAX_CONCURRENT} mkt, ${sizeDesc} | Leg-In @ ${this.minPrice}-${this.maxPrice}c | Target Cost: ${this.targetPairCost}`);
     }
@@ -566,13 +567,8 @@ export class Btc5mRecursiveDynamicHedgeStrategy implements Strategy {
     }
 
     private async joinMarket(market: any, startTime: number, endTime: number) {
-        let tokenIds: string[] = [];
-        try {
-            if (typeof market.clobTokenIds === 'string') tokenIds = JSON.parse(market.clobTokenIds);
-            else if (Array.isArray(market.clobTokenIds)) tokenIds = market.clobTokenIds as string[];
-        } catch (e) { }
-
-        if (tokenIds.length !== 2) return;
+        const tokenIds = getOutcomeAssetIds(market);
+        if (!tokenIds) return;
 
         const state: MarketState = {
             marketId: market.id,

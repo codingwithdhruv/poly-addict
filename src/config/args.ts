@@ -238,20 +238,31 @@ export function parseCliArgs(): DipArbConfig {
         // Strategy Selection
         strategy: (() => {
             if (args.includes('--arb') || args.includes('-arb')) return 'true-arb';
-            if (args.includes('--btc5m') || args.find(a => a.startsWith('--strategy=btc5m'))) return 'btc5m';
-            if (args.includes('--wick-drift') || args.find(a => a.startsWith('--strategy=wick-drift'))) return 'wick-drift';
-            if (args.includes('--dynamic-hedge') || args.find(a => a.startsWith('--strategy=dynamic-hedge'))) return 'dynamic-hedge';
-            if (args.includes('--recursive-dynamic') || args.find(a => a.startsWith('--strategy=recursive-dynamic'))) return 'recursive-dynamic';
-            if (args.includes('--simple-hedge') || args.find(a => a.startsWith('--strategy=simple-hedge'))) return 'simple-hedge';
-            if (args.includes('--usa-session') || args.includes('--mean-reversion')) return 'usa-session';
-            
-            const strategyIdx = args.indexOf('--strategy');
-            if (strategyIdx !== -1 && strategyIdx < args.length - 1) {
-                const s = args[strategyIdx + 1];
-                if (s === 'usa-session' || s === 'mean-reversion') return 'usa-session';
-                if (s === 'reversion') return 'reversion';
-                if (s === 'recursive-dynamic') return 'recursive-dynamic';
+            const strategyFlags: Record<string, string> = {
+                '--btc5m': 'btc5m',
+                '--wick-drift': 'wick-drift',
+                '--dynamic-hedge': 'dynamic-hedge',
+                '--recursive-dynamic': 'recursive-dynamic',
+                '--simple-hedge': 'simple-hedge',
+                '--usa-session': 'usa-session',
+                '--mean-reversion': 'usa-session',
+            };
+            for (const [flag, strategy] of Object.entries(strategyFlags)) {
+                if (args.includes(flag)) return strategy;
             }
+
+            const strategyEq = args.find(a => a.startsWith('--strategy='));
+            const strategyIdx = args.indexOf('--strategy');
+            const requestedStrategy = strategyEq?.slice('--strategy='.length)
+                ?? (strategyIdx !== -1 && strategyIdx < args.length - 1 ? args[strategyIdx + 1] : undefined);
+            const supportedStrategies = new Set([
+                'dip', 'btc5m', 'wick-drift', 'reversion', 'dynamic-hedge',
+                'recursive-dynamic', 'simple-hedge', 'usa-session', 'mean-reversion', 'true-arb',
+            ]);
+            if (requestedStrategy && supportedStrategies.has(requestedStrategy)) {
+                return requestedStrategy === 'mean-reversion' ? 'usa-session' : requestedStrategy;
+            }
+
             return 'dip';
         })(),
         makerBias: defaults.makerBias

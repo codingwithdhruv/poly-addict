@@ -1,6 +1,4 @@
-import WebSocket from "ws";
-
-const WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
+import type { ClobClient } from "./clob.js";
 
 export interface PriceUpdate {
     asset_id: string;
@@ -9,224 +7,176 @@ export interface PriceUpdate {
     event_type: string;
 }
 
-interface SocketMeta {
-    ws: WebSocket;
-    id: number;
-    latencyEma: number;
-    lastMessageTs: number;
-    isActive: boolean;
-    isGracePeriod: boolean; // NEW: Block reaper while connecting
+interface MarketSubscriber {
+    subscribeMarket(assetIds: string[]): Promise<any>;
 }
 
-/**
- * PriceSocket - God-Tier WebSocket Swarm
- * Manages 50+ staggered connections to minimize latency (P99 < 10ms).
- * Implements Anti-Jitter Reaper and Stale Tick Guards.
- */
+/** Market feed backed by the official SDK's managed WebSocket subscription. */
 export class PriceSocket {
-    private onPriceCallback: (update: PriceUpdate) => void;
-    private subscriptions: string[] = [];
-    private swarm: Map<number, SocketMeta> = new Map();
-    private swarmSize: number;
+    private subscriber?: MarketSubscriber;
+    private subscriptions = new Set<string>();
     private isClosed = false;
-    private nextWorkerId = 0;
+    private isActive = false;
+    private generation = 0;
+    private retryAttempt = 0;
+    private reconnectTimer?: NodeJS.Timeout;
+    private handle?: { close(): Promise<void> };
+    private readonly seenHashes = new Set<string>();
+    private readonly seenHashOrder: string[] = [];
+    private readonly maxSeenHashes = 1000;
 
-    // God-Tier tracking
-    private lastSeenPrice: Map<string, number> = new Map();
-    private lastEventHash: string[] = []; // Sliding window array
-    private MAX_HASH_WINDOW = 200;
+    constructor(
+        private readonly onPriceCallback: (update: PriceUpdate) => void,
+        _legacySwarmSize?: number,
+    ) {}
 
-    private firstBodyBypassed: Map<number, boolean> = new Map();
-
-    // Reaper
-    private reaperInterval?: NodeJS.Timeout;
-    private respawnCounter = 0;
-    private lastRespawnReset = Date.now();
-
-    constructor(onPrice: (update: PriceUpdate) => void, swarmSize: number = 3) {
-        this.onPriceCallback = onPrice;
-        this.swarmSize = swarmSize;
+    setClient(client: ClobClient): void {
+        this.subscriber = client;
+        if (this.subscriptions.size > 0 && !this.isClosed) this.restart();
     }
 
-    connect(assetIds: string[]) {
+    connect(assetIds: string[]): void {
         if (assetIds.length === 0) return;
         this.isClosed = false;
-        this.subscriptions = [...assetIds];
-        this.lastSeenPrice.clear();
-        this.lastEventHash = [];
+        this.subscriptions = new Set(assetIds.filter(isValidAssetId));
+        this.seenHashes.clear();
+        this.seenHashOrder.length = 0;
+        this.restart();
+    }
 
-        console.log(`[WS-SWARM] Spinning up ${this.swarmSize} WebSockets for ${assetIds.length} tokens...`);
+    isConnected(): boolean {
+        return this.isActive && !this.isClosed;
+    }
 
-        // Stagger startup (100ms intervals to avoid Cloudflare rate limits)
-        for (let i = 0; i < this.swarmSize; i++) {
-            setTimeout(() => {
-                if (!this.isClosed) this.spawnWorker(false);
-            }, i * 100);
+    subscribe(assetIds: string[]): void {
+        let changed = false;
+        for (const assetId of assetIds) {
+            if (isValidAssetId(assetId) && !this.subscriptions.has(assetId)) {
+                this.subscriptions.add(assetId);
+                changed = true;
+            }
         }
-
-        // Anti-Jitter Reaper (4s check)
-        if (this.reaperInterval) clearInterval(this.reaperInterval);
-        this.reaperInterval = setInterval(() => this.reaperTick(), 4000);
+        if (changed && !this.isClosed) this.restart();
     }
 
-    public isConnected(): boolean {
-        return this.swarm.size > 0 && !this.isClosed;
+    unsubscribe(assetIds: string[]): void {
+        let changed = false;
+        for (const assetId of assetIds) changed = this.subscriptions.delete(assetId) || changed;
+        if (changed && !this.isClosed) this.restart();
     }
 
-    subscribe(assetIds: string[]) {
-        const newIds = assetIds.filter(id => !this.subscriptions.includes(id));
-        if (newIds.length === 0) return;
-        this.subscriptions.push(...newIds);
-        const msg = { type: "market", assets_ids: this.subscriptions };
-        for (const meta of this.swarm.values()) {
-            if (meta.isActive) {
-                try { meta.ws.send(JSON.stringify(msg)); } catch (e) { }
+    private restart(): void {
+        const generation = ++this.generation;
+        this.isActive = false;
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = undefined;
+
+        const oldHandle = this.handle;
+        this.handle = undefined;
+        if (oldHandle) void oldHandle.close().catch((error) => {
+            console.warn("[Market stream] Failed to close the previous subscription:", error);
+        });
+
+        if (this.isClosed || !this.subscriber || this.subscriptions.size === 0) return;
+        void this.runSubscription(generation);
+    }
+
+    private async runSubscription(generation: number): Promise<void> {
+        const assetIds = [...this.subscriptions];
+        let handle: Awaited<ReturnType<MarketSubscriber["subscribeMarket"]>> | undefined;
+        try {
+            handle = await this.subscriber!.subscribeMarket(assetIds);
+            if (generation !== this.generation || this.isClosed) {
+                await handle.close();
+                return;
+            }
+
+            this.handle = handle;
+            this.isActive = true;
+            this.retryAttempt = 0;
+
+            for await (const event of handle as AsyncIterable<any>) {
+                if (generation !== this.generation || this.isClosed) break;
+                this.handleEvent(event);
+            }
+        } catch (error) {
+            if (generation === this.generation && !this.isClosed) {
+                console.warn("[Market stream] Subscription ended; reconnecting:", error);
+            }
+        } finally {
+            if (generation === this.generation) {
+                this.isActive = false;
+                if (this.handle === handle) this.handle = undefined;
+                if (!this.isClosed && this.subscriptions.size > 0) this.scheduleReconnect(generation);
+            }
+            if (handle && (generation !== this.generation || this.isClosed)) {
+                await handle.close().catch(() => undefined);
             }
         }
     }
 
-    unsubscribe(assetIds: string[]) {
-        this.subscriptions = this.subscriptions.filter(id => !assetIds.includes(id));
-        const msg = { type: "market", assets_ids: this.subscriptions };
-        for (const meta of this.swarm.values()) {
-            if (meta.isActive) {
-                try { meta.ws.send(JSON.stringify(msg)); } catch (e) { }
-            }
+    private handleEvent(event: any): void {
+        if (event?.topic !== "market" || !event.payload) return;
+        const payload = event.payload;
+        if (event.type === "last_trade_price") {
+            this.processTick(payload.assetId, payload.price, payload.timestamp, event.type);
+        } else if (event.type === "book" && payload.lastTradePrice != null) {
+            this.processTick(payload.assetId, payload.lastTradePrice, payload.timestamp, "book_snapshot");
         }
     }
 
-    private spawnWorker(isRespawn: boolean) {
-        if (this.isClosed) return;
-        const id = this.nextWorkerId++;
-        const ws = new WebSocket(WS_URL);
+    private processTick(assetId: unknown, rawPrice: unknown, rawTimestamp: unknown, eventType: string): void {
+        if (typeof assetId !== "string" || !isValidAssetId(assetId)) return;
+        const price = Number(rawPrice);
+        if (!Number.isFinite(price) || price <= 0 || price >= 1) return;
 
-        const meta: SocketMeta = {
-            ws,
-            id,
-            latencyEma: 1000, 
-            lastMessageTs: Date.now(),
-            isActive: false,
-            isGracePeriod: true
-        };
-        this.swarm.set(id, meta);
-        this.firstBodyBypassed.set(id, false);
-
-        ws.on("open", () => {
-            meta.isActive = true;
-            // End grace period after 5s
-            setTimeout(() => { meta.isGracePeriod = false; }, 5000);
-
-            const msg = { type: "market", assets_ids: this.subscriptions };
-            try { ws.send(JSON.stringify(msg)); } catch (e) { }
-        });
-
-        ws.on("message", (data: WebSocket.RawData) => {
-            const now = Date.now();
-            const delay = now - meta.lastMessageTs;
-            meta.latencyEma = (meta.latencyEma * 0.8) + (delay * 0.2); 
-            meta.lastMessageTs = now;
-
-            try {
-                const strData = data.toString();
-                if (!strData.trim().startsWith("{")) return;
-                const parsed = JSON.parse(strData);
-
-                if (parsed.event_type === "last_trade_price") {
-                    this.processTick(id, parsed, now);
-                }
-            } catch (e) { }
-        });
-
-        ws.on("close", () => {
-            const currentMeta = this.swarm.get(id);
-            // ONLY self-heal if not already removed by reaper or intentional closure
-            if (currentMeta && !this.isClosed) {
-                this.swarm.delete(id);
-                setTimeout(() => this.spawnWorker(true), 1000);
-            }
-        });
-        
-        ws.on("error", (err) => {
-            if (!this.isClosed) {
-                console.warn(`[WS-SWARM] Worker ${id} error: ${err.message}`);
-                // Worker will be cleaned up by 'close' event which usually follows error
-            }
-        });
-    }
-
-    private processTick(workerId: number, update: PriceUpdate, now: number) {
-        // [Layer 3] - First Tick Skip (Stale snapshot drop)
-        if (!this.firstBodyBypassed.get(workerId)) {
-            this.firstBodyBypassed.set(workerId, true);
-            return;
+        const timestamp = rawTimestamp == null ? String(Date.now()) : String(rawTimestamp);
+        const hash = `${assetId}:${price}:${timestamp}`;
+        if (this.seenHashes.has(hash)) return;
+        this.seenHashes.add(hash);
+        this.seenHashOrder.push(hash);
+        if (this.seenHashOrder.length > this.maxSeenHashes) {
+            const oldest = this.seenHashOrder.shift();
+            if (oldest) this.seenHashes.delete(oldest);
         }
 
-        const price = parseFloat(update.price);
-        const lastP = this.lastSeenPrice.get(update.asset_id);
-
-        // [Layer 2] - Stale Tick Guard (0.15 jump rejection)
-        if (lastP !== undefined) {
-            const delta = Math.abs(lastP - price);
-            if (delta > 0.15) return;
-        }
-
-        // [Additional 1] - Dedupe with Sliding Window
-        const hash = `${update.asset_id}-${update.price}-${update.timestamp}`;
-        if (this.lastEventHash.includes(hash)) return;
-
-        this.lastEventHash.push(hash);
-        if (this.lastEventHash.length > this.MAX_HASH_WINDOW) {
-            this.lastEventHash.shift();
-        }
-
-        this.lastSeenPrice.set(update.asset_id, price);
-        this.onPriceCallback(update);
-    }
-
-    private reaperTick() {
-        if (this.isClosed) return;
-
-        const now = Date.now();
-        // Action budget: Max 20 respawns per minute
-        if (now - this.lastRespawnReset > 60000) {
-            this.respawnCounter = 0;
-            this.lastRespawnReset = now;
-        }
-
-        const activeWorkers = Array.from(this.swarm.values()).filter(w => w.isActive && !w.isGracePeriod);
-        if (activeWorkers.length < (this.swarmSize * 0.8)) return; // Don't cull if below 80% strength
-
-        // Sort by Latency descending
-        activeWorkers.sort((a, b) => b.latencyEma - a.latencyEma);
-
-        // Cull slowest 10% (max 2 per tick)
-        const cullCount = Math.min(Math.ceil(activeWorkers.length * 0.10), 2);
-        
-        let culled = 0;
-        for (let i = 0; i < cullCount; i++) {
-            if (this.respawnCounter >= 20) break;
-
-            const target = activeWorkers[i];
-            
-            // Terminate and prevent auto-reconnect trigger
-            this.swarm.delete(target.id); 
-            try { target.ws.close(); } catch (e) {}
-
-            this.respawnCounter++;
-            culled++;
-            
-            // Stagger spawn the replacement
-            setTimeout(() => this.spawnWorker(true), culled * 50);
+        try {
+            this.onPriceCallback({
+                asset_id: assetId,
+                price: String(rawPrice),
+                timestamp,
+                event_type: eventType,
+            });
+        } catch (error) {
+            console.error("[Market stream] Price handler failed:", error);
         }
     }
 
-    close() {
+    private scheduleReconnect(generation: number): void {
+        if (this.reconnectTimer || generation !== this.generation) return;
+        const backoff = Math.min(30_000, 500 * 2 ** Math.min(this.retryAttempt, 6));
+        const jitteredDelay = Math.round(backoff * (0.8 + Math.random() * 0.4));
+        this.retryAttempt++;
+        this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = undefined;
+            if (generation === this.generation && !this.isClosed) void this.runSubscription(generation);
+        }, jitteredDelay);
+    }
+
+    close(): void {
         this.isClosed = true;
-        if (this.reaperInterval) clearInterval(this.reaperInterval);
-        for (const meta of this.swarm.values()) {
-            this.swarm.delete(meta.id); // Block onClose auto-heal
-            try { meta.ws.close(); } catch (e) {}
-        }
-        this.swarm.clear();
+        this.isActive = false;
+        this.generation++;
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = undefined;
+        const handle = this.handle;
+        this.handle = undefined;
+        if (handle) void handle.close().catch((error) => {
+            console.warn("[Market stream] Failed to close subscription:", error);
+        });
     }
+}
+
+function isValidAssetId(assetId: string): boolean {
+    return /^\d+$/.test(assetId);
 }

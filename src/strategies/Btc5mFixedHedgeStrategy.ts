@@ -1,7 +1,7 @@
 
 import { Strategy } from "./types.js";
-import { ClobClient, Side, OrderType, AssetType } from "@polymarket/clob-client-v2";
-import { GammaClient } from "../clients/gamma-api.js";
+import { ClobClient, Side, OrderType, AssetType } from "../clients/clob.js";
+import { GammaClient, getOutcomeAssetIds } from "../clients/gamma-api.js";
 import { PriceSocket } from "../clients/websocket.js";
 import { WeightedStrategyConfig } from "./BaseWeightedStrategy.js";
 export type DipArbConfig = WeightedStrategyConfig;
@@ -109,6 +109,7 @@ export class Btc5mFixedHedgeStrategy implements Strategy {
 
     async init(clobClient: ClobClient): Promise<void> {
         this.clobClient = clobClient;
+        this.priceSocket.setClient(clobClient);
         const sizeDesc = this.tradeShares > 0 ? `${this.tradeShares} shares` : `$${this.tradeSizeUsd}/side`;
         console.log(`[Btc5mHedge] Init: Max ${this.MAX_CONCURRENT} mkt, ${sizeDesc} @ ${this.minPrice}-${this.maxPrice}c (Cooldown: ${this.COOLDOWN_MS / 60000}m)`);
     }
@@ -376,13 +377,8 @@ export class Btc5mFixedHedgeStrategy implements Strategy {
     private async joinMarket(market: any, startTime: number, endTime: number) {
         console.log(`[Btc5mHedge] Joining Market: ${market.slug}`);
 
-        let tokenIds: string[] = [];
-        try {
-            if (typeof market.clobTokenIds === 'string') tokenIds = JSON.parse(market.clobTokenIds);
-            else if (Array.isArray(market.clobTokenIds)) tokenIds = market.clobTokenIds as string[];
-        } catch (e) { }
-
-        if (tokenIds.length !== 2) return;
+        const tokenIds = getOutcomeAssetIds(market);
+        if (!tokenIds) return;
 
         const state: MarketState = {
             marketId: market.id,
@@ -452,7 +448,7 @@ export class Btc5mFixedHedgeStrategy implements Strategy {
         try {
             // [FIX] Use standard getBalanceAllowance with AssetType.COLLATERAL
             const res = await this.clobClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
-            return parseFloat((res as any).balance || "0") / 1e6; // USDC.e has 6 decimals
+            return parseFloat((res as any).balance || "0") / 1e6; // pUSD uses 6 decimals
         } catch (e) {
             console.error(`[Btc5mHedge] Failed to fetch balance: ${e}`);
             return 0;

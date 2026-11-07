@@ -1,12 +1,11 @@
 import { Strategy } from "./types.js";
-import { ClobClient, Side, AssetType } from "@polymarket/clob-client-v2";
-import { GammaClient } from "../clients/gamma-api.js";
+import { ClobClient, Side, AssetType } from "../clients/clob.js";
+import { GammaClient, getOutcomeAssetIds } from "../clients/gamma-api.js";
 import { PriceSocket, PriceUpdate } from "../clients/websocket.js";
 import { PnlManager } from "../lib/pnlManager.js";
 import { WalletGuard } from "../lib/walletGuard.js";
 import { redeemPositions } from "../scripts/redeem.js";
 import { CONFIG } from "../clients/config.js";
-import { ethers } from "ethers";
 import { PriceLogger } from "../lib/priceLogger.js";
 
 // --- UI / ANSI Helpers ---
@@ -168,6 +167,7 @@ export abstract class BaseWeightedStrategy implements Strategy {
 
     async init(clobClient: ClobClient): Promise<void> {
         this.clobClient = clobClient;
+        this.priceSocket.setClient(clobClient);
 
         try {
             const res = await this.clobClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
@@ -248,10 +248,8 @@ export abstract class BaseWeightedStrategy implements Strategy {
     }
 
     protected async attachToMarket(m: any) {
-        let tokenIds: string[] = [];
-        try {
-            tokenIds = typeof m.clobTokenIds === 'string' ? JSON.parse(m.clobTokenIds) : m.clobTokenIds;
-        } catch (e) { return this.rotateToNextMarket(); }
+        const tokenIds = getOutcomeAssetIds(m);
+        if (!tokenIds) return this.rotateToNextMarket();
 
         const endTime = new Date(m.endDateIso || m.events?.[0]?.endDate).getTime();
         const startTime = endTime - (this.config.duration === '5m' ? 300 : 900) * 1000;
@@ -727,10 +725,8 @@ export abstract class BaseWeightedStrategy implements Strategy {
         if (next && !this.activeMarkets.has(next.id)) {
             console.log(color(`[${this.name}] 📥 Found next market: ${next.slug}. Subscribing to tokens...`, COLORS.CYAN));
             
-            let tokenIds: string[] = [];
-            try {
-                tokenIds = typeof next.clobTokenIds === 'string' ? JSON.parse(next.clobTokenIds) : next.clobTokenIds;
-            } catch (e) { this.nextMarketLoaded = false; return; }
+            const tokenIds = getOutcomeAssetIds(next);
+            if (!tokenIds) { this.nextMarketLoaded = false; return; }
 
             const endTime = new Date(next.endDateIso || next.events?.[0]?.endDate).getTime();
             const startTime = endTime - (this.config.duration === '5m' ? 300 : 900) * 1000;

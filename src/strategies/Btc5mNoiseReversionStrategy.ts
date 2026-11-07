@@ -1,6 +1,6 @@
 import { Strategy } from "./types.js";
-import { ClobClient, Side } from "@polymarket/clob-client-v2";
-import { GammaClient } from "../clients/gamma-api.js";
+import { ClobClient, Side } from "../clients/clob.js";
+import { GammaClient, getOutcomeAssetIds } from "../clients/gamma-api.js";
 import { PriceSocket } from "../clients/websocket.js";
 import { WeightedStrategyConfig } from "./BaseWeightedStrategy.js";
 import { redeemPositions } from "../scripts/redeem.js";
@@ -73,6 +73,7 @@ export class Btc5mNoiseReversionStrategy implements Strategy {
 
     async init(clobClient: ClobClient): Promise<void> {
         this.clobClient = clobClient;
+        this.priceSocket.setClient(clobClient);
         console.log(`[NoiseReversion] Init: Flash Crash Market Maker ($${this.tradeSizeUsd} per trade, Drop Target: ${this.requiredDrop})`);
     }
 
@@ -386,8 +387,8 @@ export class Btc5mNoiseReversionStrategy implements Strategy {
     }
 
     private async joinMarket(m: any, start: number, end: number) {
-        let tokenIds: string[] = [];
-        try { tokenIds = JSON.parse(m.clobTokenIds); } catch (e) { return; }
+        const tokenIds = getOutcomeAssetIds(m);
+        if (!tokenIds) return;
 
         const state: MarketState = {
             marketId: m.id, slug: m.slug, tokenIds, endTime: end, startTime: start,

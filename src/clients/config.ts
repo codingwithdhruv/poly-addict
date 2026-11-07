@@ -1,92 +1,74 @@
 import dotenv from "dotenv";
+import { createPublicClient, fallback, http, type Address } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { polygon } from "viem/chains";
 
 dotenv.config();
 
-const getEnvParam = (key: string): string => {
-    const value = process.env[key];
-    if (!value) {
-        throw new Error(`${key} is missing in .env file`);
-    }
-    return value;
-};
-
-const getRpcUrls = (): string[] => {
+function getRpcUrls(): string[] {
     const urls: string[] = [];
-    const add = (v?: string) => { if (v && !urls.includes(v)) urls.push(v); };
+    const add = (value?: string) => {
+        const url = value?.trim();
+        if (url && !urls.includes(url)) urls.push(url);
+    };
 
     add(process.env.RPC_URL);
-
     for (let i = 1; i <= 5; i++) {
         add(process.env[`RPC_URL_${i}`]);
-        add(process.env[`polygon_rpc_${i}`]);
     }
-
-    if (urls.length === 0) throw new Error("RPC_URL is missing");
     return urls;
 }
 
-export interface RelayerCreds {
-    key: string;
-    address: string;
-}
-
-const getRelayerCreds = (): RelayerCreds[] => {
-    const creds: RelayerCreds[] = [];
-    const tryAdd = (k?: string, a?: string) => {
-        if (k && a && !creds.some(c => c.key === k)) {
-            creds.push({ key: k, address: a });
-        }
-    };
-
-    // Try formats like RELAYER_API_KEY & 1RELAYER_API_KEY
-    tryAdd(process.env.RELAYER_API_KEY, process.env.RELAYER_API_KEY_ADDRESS);
-    tryAdd(process.env['1RELAYER_API_KEY'], process.env['1RELAYER_API_KEY_ADDRESS']);
-
-    for (let i = 2; i <= 10; i++) {
-        tryAdd(process.env[`RELAYER_API_KEY_${i}`], process.env[`RELAYER_API_KEY_ADDRESS_${i}`]);
-        tryAdd(process.env[`${i}RELAYER_API_KEY`], process.env[`${i}RELAYER_API_KEY_ADDRESS`]);
-    }
-
-    return creds;
-};
-
+/** Environment values are read at startup; secret validation happens only in trading flows. */
 export const CONFIG = {
-    HOST: "https://clob.polymarket.com",
-    RELAYER_URL: "https://relayer-v2.polymarket.com/",
-    CHAIN_ID: 137, // Polygon mainnet
-    RPC_URL: process.env.RPC_URL || "", 
     RPC_URLS: getRpcUrls(),
-    PRIVATE_KEY: getEnvParam("PRIVATE_KEY"),
-
-    // Relayer V2 Auth
-    RELAYER_API_KEY: process.env.RELAYER_API_KEY || "",
-    RELAYER_API_KEY_ADDRESS: process.env.RELAYER_API_KEY_ADDRESS || "",
-    RELAYER_CREDS_LIST: getRelayerCreds(),
-    POLY_BUILDER_CODE: process.env.POLY_BUILDER_CODE || process.env.BUILDER_CODE || "",
-
-    // Optional: Proxy / Gnosis Safe Configuration
-    // If set, the bot will act as this proxy address
-    POLY_PROXY_ADDRESS: process.env.POLY_PROXY_ADDRESS,
+    PRIVATE_KEY: process.env.PRIVATE_KEY?.trim() || "",
+    RELAYER_API_KEY: process.env.RELAYER_API_KEY?.trim() || "",
+    RELAYER_API_KEY_ADDRESS: process.env.RELAYER_API_KEY_ADDRESS?.trim() || "",
+    POLY_PROXY_ADDRESS: process.env.POLY_PROXY_ADDRESS?.trim() || "",
 };
 
-export const isProxyEnabled = (): boolean => {
-    return !!CONFIG.POLY_PROXY_ADDRESS;
+export function requirePrivateKey(): string {
+    const key = CONFIG.PRIVATE_KEY;
+    if (!key) throw new Error("PRIVATE_KEY is required for this operation.");
+    try {
+        privateKeyToAccount(key as `0x${string}`);
+    } catch {
+        throw new Error("PRIVATE_KEY must be a valid EVM private key.");
+    }
+    return key;
 }
 
-// --- Ethers Helpers for Dashboard ---
-import { ethers } from "ethers";
+export const isProxyEnabled = (): boolean => Boolean(CONFIG.POLY_PROXY_ADDRESS);
 
-let providerInstance: ethers.providers.JsonRpcProvider | null = null;
+const PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB" as Address;
+const ERC20_BALANCE_ABI = [{
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+}] as const;
+
+let providerInstance: ReturnType<typeof createPublicClient> | null = null;
 
 export const getRpcProvider = () => {
     if (!providerInstance) {
-        providerInstance = new ethers.providers.JsonRpcProvider(CONFIG.RPC_URLS[0]);
+        if (CONFIG.RPC_URLS.length === 0) throw new Error("Set RPC_URL or at least one backup RPC_URL_n.");
+        const transports = CONFIG.RPC_URLS.map((url) => http(url));
+        providerInstance = createPublicClient({
+            chain: polygon,
+            transport: transports.length === 1 ? transports[0] : fallback(transports),
+        });
     }
     return providerInstance;
 };
 
-export const getUsdcContract = () => {
-    const usdcAddr = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"; // Polygon pUSD
-    const abi = ["function balanceOf(address) view returns (uint256)"];
-    return new ethers.Contract(usdcAddr, abi, getRpcProvider());
+export const getPusdBalance = async (address: string): Promise<bigint> => {
+    return getRpcProvider().readContract({
+        address: PUSD_ADDRESS,
+        abi: ERC20_BALANCE_ABI,
+        functionName: "balanceOf",
+        args: [address as Address],
+    } as any) as Promise<bigint>;
 };

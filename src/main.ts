@@ -1,4 +1,7 @@
-import { ethers } from "ethers";
+import { formatUnits } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { CONFIG, getPusdBalance, isProxyEnabled, requirePrivateKey } from "./clients/config.js";
+import { DataApiClient } from "./clients/data-api.js";
 import { createClobClient } from "./clients/clob.js";
 import { parseCliArgs } from "./config/args.js";
 import { Generic15mDipArbStrategy, DipArbConfig } from "./strategies/Generic15mDipArbStrategy.js";
@@ -14,37 +17,6 @@ import { Btc5mRecursiveDynamicHedgeStrategy } from "./strategies/Btc5mRecursiveD
 import { Btc15mExtremeMeanReversionStrategy } from "./strategies/Btc15mExtremeMeanReversionStrategy.js";
 import { redeemPositions } from "./scripts/redeem.js";
 import { SessionLogger } from "./lib/sessionLogger.js";
-import dns from 'dns';
-import http from 'http';
-import https from 'https';
-
-// Fix Cloudflare IPv6 Network Unreachability / Timeouts globally
-dns.setDefaultResultOrder('ipv4first');
-
-// Strengthen IPv4 force for Axios/HTTP
-http.globalAgent = new http.Agent({ family: 4 });
-https.globalAgent = new https.Agent({ family: 4 });
-// Suppress Axios/CLOB Client massive JSON error noise
-const originalConsoleError = console.error;
-console.error = (...args: any[]) => {
-    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-    if (msg.includes('[CLOB Client]') || msg.includes('not enough balance') || msg.includes('request error')) {
-        if (msg.includes('not enough balance')) {
-             originalConsoleError(`\x1b[31m[Strategy Warning]\x1b[0m Insufficient collateral balance.`);
-        }
-        return;
-    }
-    originalConsoleError.apply(console, args);
-};
-
-const originalConsoleLog = console.log;
-console.log = (...args: any[]) => {
-    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-    if (msg.includes('[CLOB Client]') || msg.includes('request error')) {
-        return;
-    }
-    originalConsoleLog.apply(console, args);
-};
 // --- UI Helpers for Dashboard ---
 const COLORS = {
     RESET: "\x1b[0m",
@@ -67,6 +39,13 @@ async function main() {
     console.log("🚀 NEW CODE DEPLOYED", Date.now());
     const args = parseCliArgs();
 
+    if (args.info) {
+        console.log("Usage: ./trade <btc|eth|sol|xrp> [strategy flags]");
+        console.log("Common modes: --dashboard, --redeem, --arb");
+        console.log("Strategies: --strategy reversion|wick-drift|dynamic-hedge|recursive-dynamic|simple-hedge|usa-session|btc5m");
+        return;
+    }
+
     // --- STANDALONE DASHBOARD MODE ---
     if (args.dashboard) {
         console.clear();
@@ -74,56 +53,46 @@ async function main() {
         const pnlManager = new PnlManager();
 
         // [NEW] Background Balance Sync for Dashboard
+        const dataApi = new DataApiClient();
+        let syncing = false;
         const syncBalance = async () => {
+            if (syncing) return;
+            syncing = true;
+            let eoaAddr = "";
+            let eoaBal = 0;
+            let proxyBal = 0;
+            const proxyAddr = CONFIG.POLY_PROXY_ADDRESS;
+            let openPos = 0;
             try {
-                // Ethers setup
-                const { getUsdcContract, CONFIG, isProxyEnabled } = await import("./clients/config.js");
-                const usdc = getUsdcContract();
-                const provider = usdc.provider;
-                
-                // 1. EOA Balance
-                let eoaAddr = "";
-                let eoaBal = 0;
-                try {
-                    const wallet = new ethers.Wallet(CONFIG.PRIVATE_KEY);
-                    eoaAddr = wallet.address;
-                    const res = await usdc.balanceOf(eoaAddr);
-                    eoaBal = parseFloat(ethers.utils.formatUnits(res, 6));
-                } catch(e){}
-
-                // 2. Proxy Balance
-                let proxyBal = 0;
-                let proxyAddr = CONFIG.POLY_PROXY_ADDRESS;
-                if (isProxyEnabled() && proxyAddr) {
-                    try {
-                        const res = await usdc.balanceOf(proxyAddr);
-                        proxyBal = parseFloat(ethers.utils.formatUnits(res, 6));
-                    } catch(e){}
+                if (CONFIG.PRIVATE_KEY) {
+                    eoaAddr = privateKeyToAccount(requirePrivateKey() as `0x${string}`).address;
+                    const balance = await getPusdBalance(eoaAddr);
+                    eoaBal = Number(formatUnits(balance, 6));
                 }
-
-                // 3. Open Positions
-                let openPos = 0;
-                try {
-                    const targetAddr = proxyAddr || eoaAddr;
-                    if (targetAddr) {
-                        const req = await fetch(`https://data-api.polymarket.com/positions?user=${targetAddr}&limit=100`);
-                        const data = await req.json();
-                        if (Array.isArray(data)) {
-                            for (const pos of data) {
-                                const size = parseFloat(pos.size);
-                                const price = parseFloat(pos.currentValue || pos.initialValue || "0") / size; // currentValue is total, so we just add it
-                                if (pos.currentValue !== undefined) {
-                                    openPos += parseFloat(pos.currentValue);
-                                } else {
-                                    openPos += size * price; 
-                                }
-                            }
-                        }
-                    }
-                } catch(e){}
-
+                if (isProxyEnabled() && proxyAddr) {
+                    const balance = await getPusdBalance(proxyAddr);
+                    proxyBal = Number(formatUnits(balance, 6));
+                }
+            } catch (error) {
+                console.warn(`[Dashboard] Could not sync pUSD balances: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            try {
+                const targetAddr = proxyAddr || eoaAddr;
+                if (targetAddr) {
+                    const positions = await dataApi.listPositions(targetAddr, { includeArchived: true });
+                    openPos = positions.reduce((sum, position) => {
+                        const value = Number(position.current_value);
+                        return sum + (Number.isFinite(value) ? value : 0);
+                    }, 0);
+                }
+            } catch (error) {
+                console.warn(`[Dashboard] Could not sync positions: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            try {
                 pnlManager.updateDashboardWallets(eoaBal, proxyBal, openPos);
-            } catch (e) {}
+            } finally {
+                syncing = false;
+            }
         };
         syncBalance(); // Initial
         setInterval(syncBalance, 30000); // Every 30s
@@ -198,6 +167,13 @@ async function main() {
         return;
     }
 
+    // Redeem mode is independent of strategy setup and only initializes trading clients
+    // when the Data API finds an action to perform.
+    if (args.redeem) {
+        await redeemPositions();
+        return;
+    }
+
     // --- NORMAL BOT MODE ---
     console.log(`Starting Dip Arbitrage Bot for ${args.coin}...`);
     console.log(`Config: Dip=${args.dipThreshold * 100}% Target=${args.sumTarget}`);
@@ -216,7 +192,6 @@ async function main() {
     // 2. Clients
     // 2. Clients
     console.log("Initializing local wallet and relay client...");
-    // const wallet = new ethers.Wallet(privateKey); // Not needed here if clients handle it
     // const chainId = 137; // Polygon
         console.log("Initializing CLOB client...");
     const clobClient = await createClobClient();
@@ -255,12 +230,6 @@ async function main() {
         scanIntervalMs: 2000,
         logIntervalMs: 5000
     };
-
-    // Handle --redeem special mode
-    if (args.redeem) {
-        await redeemPositions();
-        return;
-    }
 
     const bot = new Bot(clobClient, strategy, config);
     await bot.start();

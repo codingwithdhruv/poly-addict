@@ -4,7 +4,9 @@
 # Example: ./arb btc --shares=50
 
 COIN=$1
-shift # Remove the first argument (coin) so the rest can be passed directly
+if [ "$#" -gt 0 ]; then shift; fi
+COIN=${COIN#--}
+COIN=${COIN#-}
 
 if [ -z "$COIN" ]; then
   echo "Usage: ./arb <coin> [options]"
@@ -13,4 +15,4 @@ if [ -z "$COIN" ]; then
 fi
 
 # Run the bot with the coin flag AND the -arb flag to trigger TruePairArbStrategy
-npx tsx src/main.ts -arb --$COIN "$@"
+npm run dev -- --arb --$COIN "$@"

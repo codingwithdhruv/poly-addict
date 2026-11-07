@@ -1,4 +1,5 @@
 import { BaseWeightedStrategy, MarketState, PricePoint, color, COLORS, box } from "./BaseWeightedStrategy.js";
+import { getOutcomeAssetIds } from "../clients/gamma-api.js";
 
 /**
  * Btc5mVolatilityStrategy
@@ -88,8 +89,8 @@ export class Btc5mVolatilityStrategy extends BaseWeightedStrategy {
             const markets = await this.scanUpcomingMarkets(this.config.coin, '5m');
             const next = markets.find(m => new Date(m.endDateIso || m.events?.[0]?.endDate).getTime() > Date.now() + 60000);
             if (next) {
-                const tokenIds = typeof next.clobTokenIds === 'string' ? JSON.parse(next.clobTokenIds) : next.clobTokenIds;
-                if (tokenIds.length === 2) (this.priceSocket as any).subscribe?.(tokenIds);
+                const tokenIds = getOutcomeAssetIds(next);
+                if (tokenIds) this.priceSocket.subscribe(tokenIds);
             }
         } catch(e) {}
     }

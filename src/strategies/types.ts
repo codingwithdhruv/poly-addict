@@ -1,4 +1,4 @@
-import { ClobClient } from "@polymarket/clob-client-v2";
+import type { ClobClient } from "../clients/clob.js";
 
 export interface Strategy {
     name: string;

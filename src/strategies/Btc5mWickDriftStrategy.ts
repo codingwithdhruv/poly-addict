@@ -1,6 +1,6 @@
 import { Strategy } from "./types.js";
-import { ClobClient, Side, OrderType, AssetType } from "@polymarket/clob-client-v2";
-import { GammaClient } from "../clients/gamma-api.js";
+import { ClobClient, Side, OrderType, AssetType } from "../clients/clob.js";
+import { GammaClient, getOutcomeAssetIds } from "../clients/gamma-api.js";
 import { PriceSocket } from "../clients/websocket.js";
 import { WeightedStrategyConfig } from "./BaseWeightedStrategy.js";
 export type DipArbConfig = WeightedStrategyConfig & { useBybitFilter?: boolean, bybitInterval?: string };
@@ -115,6 +115,7 @@ export class Btc5mWickDriftStrategy implements Strategy {
 
     async init(clobClient: ClobClient): Promise<void> {
         this.clobClient = clobClient;
+        this.priceSocket?.setClient(clobClient);
         const sizeDesc = this.tradeShares > 0 ? `${this.tradeShares} shares` : `$${this.tradeSizeUsd}/side`;
         console.log(`[WickDrift] Init: Hunter Mode (Target Profit: $${this.targetProfitUsd} per share)`);
         
@@ -188,7 +189,7 @@ export class Btc5mWickDriftStrategy implements Strategy {
             // [NEW] Delayed WebSocket Connection Trigger (1 min before start)
             const msToStart = state.startTime - now;
             if (msToStart > 0 && msToStart < 60000 && !this.priceSocket?.isConnected()) {
-                console.log(color(`[WickDrift] ⚡ Market starting in ${Math.round(msToStart/1000)}s. Connecting WebSocket Swarm...`, COLORS.CYAN));
+                console.log(color(`[WickDrift] ⚡ Market starting in ${Math.round(msToStart/1000)}s. Connecting market feed...`, COLORS.CYAN));
                 this.priceSocket?.connect(state.tokenIds);
             }
         }
@@ -437,8 +438,8 @@ export class Btc5mWickDriftStrategy implements Strategy {
     }
 
     private async joinMarket(m: any, start: number, end: number) {
-        let tokenIds: string[] = [];
-        try { tokenIds = JSON.parse(m.clobTokenIds); } catch (e) { return; }
+        const tokenIds = getOutcomeAssetIds(m);
+        if (!tokenIds) return;
 
         const state: MarketState = {
             marketId: m.id, slug: m.slug, tokenIds, endTime: end, startTime: start,

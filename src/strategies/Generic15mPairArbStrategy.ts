@@ -1,7 +1,7 @@
 import { Strategy } from "./types.js";
-import { ClobClient, Side, AssetType } from "@polymarket/clob-client-v2";
+import { ClobClient, Side, AssetType } from "../clients/clob.js";
 import { PriceSocket, PriceUpdate } from "../clients/websocket.js";
-import { GammaClient } from "../clients/gamma-api.js";
+import { GammaClient, getOutcomeAssetIds } from "../clients/gamma-api.js";
 import { PnlManager } from "../lib/pnlManager.js";
 import { WalletGuard } from "../lib/walletGuard.js";
 import { PriceLogger } from "../lib/priceLogger.js";
@@ -70,6 +70,7 @@ export class Generic15mPairArbStrategy implements Strategy {
 
     async init(clob: ClobClient) {
         this.clob = clob;
+        this.socket.setClient(clob);
         const bal = await clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
         const usd = parseFloat((bal as any).balance) / 1e6;
         this.pnl.updateWalletBalance(usd);
@@ -125,7 +126,9 @@ export class Generic15mPairArbStrategy implements Strategy {
         }
 
         // Setup Market State
-        this.tokenIds = JSON.parse(targetMarket.clobTokenIds);
+        const assetIds = getOutcomeAssetIds(targetMarket);
+        if (!assetIds) throw new Error(`Market ${targetMarket.slug} has no supported binary outcome identifiers.`);
+        this.tokenIds = assetIds;
         this.marketId = targetMarket.id;
         this.marketSlug = targetMarket.slug;
         this.marketQuestion = targetMarket.question;

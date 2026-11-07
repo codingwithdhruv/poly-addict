@@ -2,29 +2,30 @@
     "name": "poly-with-ts",
     "version": "1.0.0",
     "description": "",
-    "main": "dist/index.js",
+    "main": "dist/main.js",
     "type": "module",
+    "engines": {
+        "node": ">=24"
+    },
     "scripts": {
-        "build": "tsc",
+        "build": "node scripts/clean-dist.mjs && tsc",
         "prestart": "npm run build",
         "start": "node dist/main.js",
-        "dev": "ts-node-esm src/main.ts",
-        "test": "echo \"Error: no test specified\" && exit 1"
+        "dev": "tsx src/main.ts",
+        "test": "npm run build && node --test test/*.test.js"
     },
     "keywords": [],
     "author": "",
     "license": "ISC",
     "dependencies": {
-        "@polymarket/clob-client-v2": "^1.0.0",
-        "@polymarket/relayer-client": "^4.1.0",
+        "@polymarket/client": "^0.17.0",
         "dotenv": "^16.0.0",
-        "ethers": "^5.8.0",
-        "viem": "^2.43.5",
+        "viem": "^2.46.3",
         "ws": "^8.19.0"
     },
     "devDependencies": {
         "@types/ws": "^8.18.1",
-        "ts-node": "^10.0.0",
+        "tsx": "^4.20.6",
         "typescript": "^5.0.0"
     }
 }

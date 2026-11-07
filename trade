@@ -4,10 +4,16 @@
 # Example: ./trade btc --shares=50
 
 COIN=$1
-shift # Remove the first argument (coin) so the rest can be passed directly
 
-# Normalize coin input (remove - or --)
-COIN=${COIN//-/}
+case "$COIN" in
+  -redeem|--redeem) npm run dev -- --redeem; exit $? ;;
+  -info|--info) npm run dev -- --info; exit $? ;;
+  -dashboard|--dashboard) npm run dev -- --dashboard; exit $? ;;
+esac
+
+if [ "$#" -gt 0 ]; then shift; fi
+COIN=${COIN#--}
+COIN=${COIN#-}
 
 if [ -z "$COIN" ]; then
   echo "Usage: ./trade <coin> [options]"
@@ -17,20 +23,5 @@ fi
 
 
 
-if [ "$COIN" == "-redeem" ]; then
-  npx tsx src/main.ts -redeem
-  exit 0
-fi
-
-if [ "$COIN" == "-info" ]; then
-  npx tsx src/main.ts -info
-  exit 0
-fi
-
-if [ "$COIN" == "-dashboard" ]; then
-  npx tsx src/main.ts -dashboard
-  exit 0
-fi
-
 # Run the bot with the coin flag and any other passed arguments
-npx tsx src/main.ts --$COIN "$@"
+npm run dev -- --$COIN "$@"

@@ -1,4 +1,4 @@
-import { ClobClient } from "@polymarket/clob-client-v2";
+import { ClobClient } from "./clients/clob.js";
 import { Strategy } from "./strategies/types.js";
 
 export interface BotConfig {

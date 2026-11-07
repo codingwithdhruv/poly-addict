@@ -1,7 +1,7 @@
 
 import { Strategy } from "./types.js";
-import { ClobClient, Side, OrderType } from "@polymarket/clob-client-v2";
-import { GammaClient } from "../clients/gamma-api.js";
+import { ClobClient, Side, OrderType } from "../clients/clob.js";
+import { GammaClient, getOutcomeAssetIds } from "../clients/gamma-api.js";
 import { PriceSocket } from "../clients/websocket.js";
 import { WeightedStrategyConfig } from "./BaseWeightedStrategy.js";
 export type DipArbConfig = WeightedStrategyConfig;
@@ -81,6 +81,7 @@ export class Btc15mExtremeMeanReversionStrategy implements Strategy {
 
     async init(clobClient: ClobClient): Promise<void> {
         this.clobClient = clobClient;
+        this.priceSocket?.setClient(clobClient);
         console.log(`[Btc15mExtreme] Init: Target ${this.COIN}, Size $${this.tradeSizeUsd}, Price ${this.limitPrice}c, Side ${this.side}`);
     }
 
@@ -188,13 +189,8 @@ export class Btc15mExtremeMeanReversionStrategy implements Strategy {
     private async joinMarket(market: any, startTime: number, endTime: number) {
         console.log(`[Btc15mExtreme] Joining ${market.slug}`);
 
-        let tokenIds: string[] = [];
-        try {
-            if (typeof market.clobTokenIds === 'string') tokenIds = JSON.parse(market.clobTokenIds);
-            else if (Array.isArray(market.clobTokenIds)) tokenIds = market.clobTokenIds;
-        } catch (e) { }
-
-        if (tokenIds.length !== 2) return;
+        const tokenIds = getOutcomeAssetIds(market);
+        if (!tokenIds) return;
 
         const state: MarketState = {
             marketId: market.id,
